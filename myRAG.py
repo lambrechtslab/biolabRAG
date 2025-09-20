@@ -8,7 +8,7 @@ OLLAMA_HOST=127.0.0.1:11435 CUDA_VISIBLE_DEVICES=1 ollama serve >& ollama_server
 #}}
 #{{ Load packages
 import os
-import readline
+import readline #Make the input() function works better.
 from langchain_ollama import ChatOllama, OllamaEmbeddings
 from langchain.document_loaders import PyPDFLoader
 from langchain.text_splitter import RecursiveCharacterTextSplitter
@@ -20,13 +20,14 @@ from langchain_chroma import Chroma
 from langchain_core.runnables import RunnableLambda
 from langchain.memory import ConversationBufferMemory
 from langchain.prompts import PromptTemplate
+from langchain.prompts.chat import ChatPromptTemplate, SystemMessagePromptTemplate, HumanMessagePromptTemplate
 
 # Repress deprecation warning
 import warnings
 # Suppress LangChain deprecation warnings
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 #}}
-class myRAG:
+class RAG:
     #{{ init
     def __init__(self):
         print("RAG init....")
@@ -63,7 +64,7 @@ class myRAG:
         # retriever = vector_store.as_retriever(search_type="similarity", search_kwargs={"k": 1})
     #}}
     #{{ Create retriver
-    def retriver_init(self, k=1):
+    def retriver_init(self, k=5):
         self.retriever = self.vector_store.as_retriever(search_type="similarity", search_kwargs={"k": k})
     
 
@@ -141,12 +142,108 @@ You are an AI assistant.
             result = chain.invoke({"question": query, "context": retdoc})
             print(f"\nBot: {result.content}\n")
     #}}
-#{{ main
-def main():
-    rag=myRAG()
-    rag.data_lib_init()
-    rag.retriver_init()
-    rag.chat()
-#}}
+    #{{ readly
+    def ready(self):
+        self.data_lib_init()
+        self.retriver_init(5)
+    #}}
+    #{{ QA if need retrival
+    def QA_need_retrival(self, quest:str):
+        system_template = """
+You are a classifier. Decide whether a user’s question (see <UserQuestion>) should trigger retrieval from an external knowledge source. 
+
+Decision rules:
+- Output "RETRIEVAL_NEEDED" if retrieval could *probably* improve the answer, even if the question might be answerable without it. 
+- Output "NO_RETRIEVAL_NEEDED" only if retrieval would add no meaningful value (e.g., simple math, logic puzzles, or widely known facts such as “What is 2+2?” or “Who wrote Hamlet?”).
+
+Output format:
+- Output either "RETRIEVAL_NEEDED" or "NO_RETRIEVAL_NEEDED"
+- No any other texts.
+        """
+        system_prompt = SystemMessagePromptTemplate.from_template(system_template)
+        human_template = """
+<UserQuestion>
+{question}
+</UserQuestion>
+        """
+        human_prompt = HumanMessagePromptTemplate.from_template(human_template)
+        return self.llm.invoke(ChatPromptTemplate.from_messages([system_prompt, human_prompt]).format_prompt(question=quest).to_messages()).content == "RETRIEVAL_NEEDED"
+    #}}
+    #{{ QA rewrite user's question for retrival
+    def QA_rewrite_question_for_retrival(self, quest:str):
+        system_template = """
+You are a query rewriter for a Retrieval-Augmented Generation (RAG) system. 
+Your task is to rewrite the user’s question (see <UserQuestion>) into a clear, self-contained search query 
+that is optimized for semantic similarity search using embeddings.
+
+Guidelines:
+- Preserve the user’s original intent.
+- Make the query explicit and unambiguous (expand pronouns and vague references).
+- Remove polite phrases or conversational fluff.
+- Be concise and focus on the key information to retrieve.
+- Do not add information not present in the question.
+
+Output:
+Only provide the rewritten query.
+    """
+        system_prompt = SystemMessagePromptTemplate.from_template(system_template)
+        human_template = """
+<UserQuestion>
+{question}
+</UserQuestion>
+    """
+        human_prompt = HumanMessagePromptTemplate.from_template(human_template)
+        return self.llm.invoke(ChatPromptTemplate.from_messages([system_prompt, human_prompt]).format_prompt(question=quest).to_messages()).content
+    #}}
+    #{{ QA if tetrivalled documents is relevant
+    def QA_if_doc_relevant_to_question(self, quest:str, doc:str):
+        system_template = """
+You are a relevance classifier for a retrieval-augmented generation (RAG) system. 
+Your task is to decide whether the retrieved document (see <RetrievedDocument>) is relevant to the user’s question (see <UserQuestion>). 
+
+Decision rules:
+- Output "RELEVANT" if the document contains information that could help answer the question, 
+  even if partially or indirectly.
+- Output "NOT_RELEVANT" if the document does not provide useful information for answering the question.
+
+Output format:
+- Output either "RELEVANT" or "NOT_RELEVANT"
+- No any other texts.
+        """
+        system_prompt = SystemMessagePromptTemplate.from_template(system_template)
+        human_template = """
+<RetrievedDocument>
+{retrieved_document}
+</RetrievedDocument>
+
+<UserQuestion>
+{question}
+</UserQuestion>
+        """
+        human_prompt = HumanMessagePromptTemplate.from_template(human_template)
+        return self.llm.invoke(ChatPromptTemplate.from_messages([system_prompt, human_prompt])
+                               .format_prompt(question=quest, retrieved_document=doc).to_messages()).content == "RELEVANT"
+    #}}
+    #{{ Reload custom_retreiver
+    def custom_retreiver(self, query: str) -> str:
+        if not(self.QA_need_retrival(query)):
+            return "No context needed."
+        print("Retrival...")
+        squery=self.QA_rewrite_question_for_retrival(query)
+        print(f"Retrival quest: {squery}")
+        txt=self.retriever.get_relevant_documents(squery)
+        doc=[]
+        for i, x in enumerate(txt):
+            print(f"Check doc {i}...", end='')
+            if self.QA_if_doc_relevant_to_question(query, x.page_content):
+                doc.append(f"<doc id={i} >{x.page_content}</doc>")
+                print("Relevant.")
+            else:
+                print("Not relevant.")
+
+        return "".join(doc)
+    #}}
 if __name__ == "__main__":
-    main()
+    rag=RAG()
+    rag.ready()
+    rag.chat()
