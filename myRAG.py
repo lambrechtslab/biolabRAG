@@ -44,24 +44,33 @@ class RAG:
     #{{ Function for saving data to lib
     def data_lib_init(self):
         pdf_folder = "/vsc-hard-mounts/leuven-user/323/vsc32366/projects/LLM/RAG_data"
+        persist_directory = 'Chroma_save'
         documents = []
-        for filename in os.listdir(pdf_folder):
-            if filename.endswith(".pdf"):
-                print(f"Loading {filename}")
-                loader = PyPDFLoader(os.path.join(pdf_folder, filename))
-                docs = loader.load()
-                documents.extend(docs)
-        # Split Documents into Chunks
-        text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
-        texts = text_splitter.split_documents(documents)
-
-        self.vector_store = Chroma(
-            collection_name="example_collection",
-            embedding_function=self.embeddings,
-            #persist_directory="./chroma_langchain_db",  # Where to save data locally, remove if not necessary
+        if os.path.isdir(persist_directory):
+            print("Found RAG library. Loading")
+            self.vector_store = Chroma(
+                collection_name="example_collection",
+                embedding_function=self.embeddings,
+                persist_directory=persist_directory,  # Where to save data locally, remove if not necessary
             )
-        self.vector_store.add_documents(texts)
-        # retriever = vector_store.as_retriever(search_type="similarity", search_kwargs={"k": 1})
+        else:
+            print(f"Prepare RAG library to folder: {persist_directory}")
+            for filename in os.listdir(pdf_folder):
+                if filename.endswith(".pdf"):
+                    print(f"Loading {filename}")
+                    loader = PyPDFLoader(os.path.join(pdf_folder, filename))
+                    docs = loader.load()
+                    documents.extend(docs)
+                    # Split Documents into Chunks
+            text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
+            texts = text_splitter.split_documents(documents)
+
+            self.vector_store = Chroma(
+                collection_name="example_collection",
+                embedding_function=self.embeddings,
+                persist_directory=persist_directory,  # Where to save data locally, remove if not necessary
+            )
+            self.vector_store.add_documents(texts)
     #}}
     #{{ Create retriver
     def retriver_init(self, k=5):
@@ -127,10 +136,20 @@ You are an AI assistant.
             human_prompt = HumanMessagePromptTemplate.from_template(human_template)
             return ChatPromptTemplate.from_messages([system_prompt, human_prompt])
     #}}
+    #{{ readly
+    def ready(self):
+        self.data_lib_init()
+        self.retriver_init(5)
+        self.chain=self.ConversationalRunnable(self.llm)
+    #}}
     #{{ Chat function
+    def ask(self, query:str) -> str:
+        retdoc = self.custom_retreiver(query)
+        result = self.chain.invoke({"question": query, "context": retdoc})
+        return result.content
+        
     def chat(self):
         print("Let talk :) (type 'bye' to quit)")
-        chain=self.ConversationalRunnable(self.llm)
         while True:
             query = input("\nYou: ").strip()
             if query.lower() in ["exit", "quit", "bye"]:
@@ -138,14 +157,8 @@ You are an AI assistant.
                 break
 
             #result = qa_chain({"query": query})
-            retdoc=self.custom_retreiver(query)
-            result = chain.invoke({"question": query, "context": retdoc})
-            print(f"\nBot: {result.content}\n")
-    #}}
-    #{{ readly
-    def ready(self):
-        self.data_lib_init()
-        self.retriver_init(5)
+            answer = self.ask(query)
+            print(f"\nBot: {answer}\n")
     #}}
     #{{ QA if need retrival
     def QA_need_retrival(self, quest:str):
