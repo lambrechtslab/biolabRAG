@@ -144,7 +144,7 @@ You are an AI assistant.
     #}}
     #{{ Chat function
     def ask(self, query:str) -> str:
-        retdoc = self.custom_retreiver(query)
+        retdoc = self.custom_retreiver(query, memory=self.chain.memory)
         result = self.chain.invoke({"question": query, "context": retdoc})
         return result.content
         
@@ -161,11 +161,12 @@ You are an AI assistant.
             print(f"\nBot: {answer}\n")
     #}}
     #{{ QA if need retrival
-    def QA_need_retrival(self, quest:str):
+    def QA_need_retrival(self, quest:str, memory):
         system_template = """
 You are a classifier. Decide whether a user’s question (see <UserQuestion>) should trigger retrieval from an external knowledge source. 
 
 Decision rules:
+- Use the chat history (<ChatHistory>) to resolve pronouns, references, and context in the user’s latest question.  
 - Output "RETRIEVAL_NEEDED" if retrieval could *probably* improve the answer, even if the question might be answerable without it. 
 - Output "NO_RETRIEVAL_NEEDED" only if retrieval would add no meaningful value (e.g., simple math, logic puzzles, or widely known facts such as “What is 2+2?” or “Who wrote Hamlet?”).
 
@@ -175,46 +176,62 @@ Output format:
         """
         system_prompt = SystemMessagePromptTemplate.from_template(system_template)
         human_template = """
+<ChatHistory>
+{chat_history}
+</ChatHistory>
+
 <UserQuestion>
 {question}
 </UserQuestion>
         """
         human_prompt = HumanMessagePromptTemplate.from_template(human_template)
-        return self.llm.invoke(ChatPromptTemplate.from_messages([system_prompt, human_prompt]).format_prompt(question=quest).to_messages()).content == "RETRIEVAL_NEEDED"
+        chat_history = memory.load_memory_variables({})["chat_history"]
+        return self.llm.invoke(ChatPromptTemplate.from_messages([system_prompt, human_prompt]
+            ).format_prompt(question=quest, chat_history=chat_history).to_messages()
+           ).content == "RETRIEVAL_NEEDED"
     #}}
     #{{ QA rewrite user's question for retrival
-    def QA_rewrite_question_for_retrival(self, quest:str):
+    def QA_rewrite_question_for_retrival(self, quest:str, memory):
         system_template = """
 You are a query rewriter for a Retrieval-Augmented Generation (RAG) system. 
-Your task is to rewrite the user’s question (see <UserQuestion>) into a clear, self-contained search query 
-that is optimized for semantic similarity search using embeddings.
+Your task is to rewrite the user’s latest question (see <UserQuestion>) into one or more clear, self-contained search queries 
+that are optimized for semantic similarity search using embeddings.
 
 Guidelines:
+- Use the chat history (<ChatHistory>) to resolve pronouns, references, and context in the user’s latest question.
 - Preserve the user’s original intent.
-- Make the query explicit and unambiguous (expand pronouns and vague references).
+- When useful, break the question into multiple sub-queries that capture different aspects of the information need.
+- You may also generate "step-back" queries (broader or higher-level versions of the question) to improve retrieval coverage.
+- Make the queries explicit and unambiguous (expand pronouns and vague references).
 - Remove polite phrases or conversational fluff.
-- Be concise and focus on the key information to retrieve.
-- Do not add information not present in the question.
+- Be concise and focus only on the key information to retrieve.
+- Do not add information not present in the chat history or user’s question.
 
 Output:
-Only provide the rewritten query.
-    """
+Provide the rewritten queries as plain text, each query on its own line, with no numbering or bullets.
+        """
         system_prompt = SystemMessagePromptTemplate.from_template(system_template)
         human_template = """
+<ChatHistory>
+{chat_history}
+</ChatHistory>
+
 <UserQuestion>
 {question}
 </UserQuestion>
     """
         human_prompt = HumanMessagePromptTemplate.from_template(human_template)
-        return self.llm.invoke(ChatPromptTemplate.from_messages([system_prompt, human_prompt]).format_prompt(question=quest).to_messages()).content
+        chat_history = memory.load_memory_variables({})["chat_history"]
+        return self.llm.invoke(ChatPromptTemplate.from_messages([system_prompt, human_prompt]).format_prompt(question=quest, chat_history=chat_history).to_messages()).content
     #}}
     #{{ QA if tetrivalled documents is relevant
-    def QA_if_doc_relevant_to_question(self, quest:str, doc:str):
+    def QA_if_doc_relevant_to_question(self, quest:str, doc:str, memory):
         system_template = """
 You are a relevance classifier for a retrieval-augmented generation (RAG) system. 
 Your task is to decide whether the retrieved document (see <RetrievedDocument>) is relevant to the user’s question (see <UserQuestion>). 
 
 Decision rules:
+- Use the chat history (<ChatHistory>) to resolve pronouns, references, and context in the user’s latest question.  
 - Output "RELEVANT" if the document contains information that could help answer the question, 
   even if partially or indirectly.
 - Output "NOT_RELEVANT" if the document does not provide useful information for answering the question.
@@ -225,36 +242,46 @@ Output format:
         """
         system_prompt = SystemMessagePromptTemplate.from_template(system_template)
         human_template = """
-<RetrievedDocument>
-{retrieved_document}
-</RetrievedDocument>
-
+<ChatHistory>
+{chat_history}
+</ChatHistory>
+        
 <UserQuestion>
 {question}
 </UserQuestion>
+
+<RetrievedDocument>
+{retrieved_document}
+</RetrievedDocument>
         """
         human_prompt = HumanMessagePromptTemplate.from_template(human_template)
+        chat_history = memory.load_memory_variables({})["chat_history"]
         return self.llm.invoke(ChatPromptTemplate.from_messages([system_prompt, human_prompt])
-                               .format_prompt(question=quest, retrieved_document=doc).to_messages()).content == "RELEVANT"
+                               .format_prompt(question=quest, retrieved_document=doc, chat_history=chat_history).to_messages()).content == "RELEVANT"
     #}}
     #{{ Reload custom_retreiver
-    def custom_retreiver(self, query: str) -> str:
-        if not(self.QA_need_retrival(query)):
+    def custom_retreiver(self, query: str, memory) -> str:
+        if not(self.QA_need_retrival(query, memory=memory)):
             return "No context needed."
         print("Retrival...")
-        squery=self.QA_rewrite_question_for_retrival(query)
-        print(f"Retrival quest: {squery}")
-        txt=self.retriever.get_relevant_documents(squery)
-        doc=[]
-        for i, x in enumerate(txt):
-            print(f"Check doc {i}...", end='')
-            if self.QA_if_doc_relevant_to_question(query, x.page_content):
-                doc.append(f"<doc id={i} >{x.page_content}</doc>")
-                print("Relevant.")
-            else:
-                print("Not relevant.")
+        squerys=self.QA_rewrite_question_for_retrival(query, memory=memory)
+        doc=set()
+        for squery in squerys.splitlines():
+            baddoc=set()
+            print(f"Retrival quest: {squery}")
+            txt=self.retriever.get_relevant_documents(squery)
+            for i, x in enumerate(txt):
+                print(f"Check doc {i}...", end='')
+                if (x.page_content in doc) or (x.page_content in baddoc):
+                    print("Duplicate.")
+                elif self.QA_if_doc_relevant_to_question(squery, x.page_content, memory=memory):
+                    doc.add(x.page_content)
+                    print("Relevant.")
+                else:
+                    baddoc.add(x.page_content)
+                    print("Not relevant.")
 
-        return "".join(doc)
+        return "\n".join([f"<doc id={i} >{x}</doc>" for i, x in enumerate(doc)])
     #}}
 if __name__ == "__main__":
     rag=RAG()
