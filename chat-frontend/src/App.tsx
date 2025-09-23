@@ -1,4 +1,7 @@
 import { useState, useRef, useEffect } from "react";
+import ReactMarkdown from "react-markdown";   // 👈 import
+import remarkGfm from "remark-gfm";           // optional for tables, checkboxes
+
 import "./App.css"; // 👈 Import your CSS file
 
 interface Message {
@@ -52,7 +55,9 @@ export default function App() {
           key={i}
           className={`message ${msg.sender === "user" ? "user" : "bot"}`}
 	  >
-	  {msg.text}
+	  <ReactMarkdown remarkPlugins={[remarkGfm]}>
+            {msg.text}
+          </ReactMarkdown>
         </div>
         ))}
         <div ref={bottomRef} />

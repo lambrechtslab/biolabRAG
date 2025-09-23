@@ -44,7 +44,7 @@ class RAG:
     #{{ Function for saving data to lib
     def data_lib_init(self):
         pdf_folder = "/vsc-hard-mounts/leuven-user/323/vsc32366/projects/LLM/RAG_data"
-        persist_directory = 'Chroma_save'
+        persist_directory = '/vsc-hard-mounts/leuven-user/323/vsc32366/projects/LLM/Chroma_save'
         documents = []
         if os.path.isdir(persist_directory):
             print("Found RAG library. Loading")
@@ -208,7 +208,7 @@ Guidelines:
 - Do not add information not present in the chat history or user’s question.
 
 Output:
-Provide the rewritten queries as plain text, each query on its own line, with no numbering or bullets.
+Provide the rewritten queries as plain text, each query on its own line, with no numbering or bullets. Do not output explanations.
         """
         system_prompt = SystemMessagePromptTemplate.from_template(system_template)
         human_template = """
