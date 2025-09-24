@@ -80,7 +80,7 @@ class RAG:
                     print("Done.")
     #}}
     #{{ Create retriver
-    def retriver_init(self, k=5):
+    def retriver_init(self, k=10):
         self.retriever = self.vector_store.as_retriever(search_type="similarity", search_kwargs={"k": k})
 
     # def custom_retreiver(self, query: str) -> str:
@@ -139,7 +139,7 @@ You are an AI assistant.
 - Use <context> as the primary source. Each document is between <doc filename="FILE_NAME" page="PAGE"> and </doc>.
 - Base answers only on retrieved context; do not invent facts.
 - Insert concise citation markers like **[1]**, **[2]**, etc. directly after the relevant statement.
-- At the end of your answer, add a "References" section that lists each citation number with the corresponding file name and page in the format:
+- If there are any citations, at the end of your answer, add a "References" section that lists each citation number with the corresponding file name and page in the format:
   **[1]** FILE_NAME p.PAGE
   **[2]** FILE_NAME p.PAGE
 - If multiple passages support the same point, list all relevant sources under the same number.
@@ -166,7 +166,7 @@ You are an AI assistant.
     #{{ readly
     def ready(self):
         self.data_lib_init()
-        self.retriver_init(5)
+        self.retriver_init(10)
         self.chain=self.ConversationalRunnable(self.llm)
     #}}
     #{{ Chat function
