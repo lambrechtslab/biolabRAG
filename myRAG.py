@@ -128,12 +128,24 @@ class RAG:
                 SystemMessagePromptTemplate,
                 HumanMessagePromptTemplate
             )
+#             system_template = """
+# You are an AI assistant. 
+# - Use <context> as the primary source. Each document is between <doc filename="FILENAME" page="PAGE"> and </doc>.
+# - Use <chat_history> to maintain context.
+# - Base answers on retrieved context; do not invent facts.
+#                     """
             system_template = """
 You are an AI assistant. 
-- Use <context> as the primary source. Each document is between <doc filename="FILENAME" page="PAGE"> and </doc>.
-- Use <chat_history> to maintain context.
-- Base answers on retrieved context; do not invent facts.
-                    """
+- Use <context> as the primary source. Each document is between <doc filename="FILE_NAME" page="PAGE"> and </doc>.
+- Base answers only on retrieved context; do not invent facts.
+- Insert concise citation markers like **[1]**, **[2]**, etc. directly after the relevant statement.
+- At the end of your answer, add a "References" section that lists each citation number with the corresponding file name and page in the format:
+  **[1]** FILE_NAME p.PAGE
+  **[2]** FILE_NAME p.PAGE
+- If multiple passages support the same point, list all relevant sources under the same number.
+- If no relevant information is found in <context>, say you don't know.
+- Use <chat_history> to maintain conversation context.
+"""
             system_prompt = SystemMessagePromptTemplate.from_template(system_template)
             human_template = """
 <context>
@@ -161,9 +173,9 @@ You are an AI assistant.
     def ask(self, query:str) -> str:
         retdoc, retdoc_meta = self.custom_retreiver(query, memory=self.chain.memory)
         result = self.chain.invoke({"question": query, "context": retdoc}).content
-        if retdoc_meta:
-            result = result + '\n\n_Reference:_\n' +\
-            "\n".join([f"- _{x['filename']} Page:{x['page']}_" for x in retdoc_meta])
+        # if retdoc_meta:
+        #     result = result + '\n\n_Reference:_\n' +\
+        #     "\n".join([f"- _{x['filename']} Page:{x['page']}_" for x in retdoc_meta])
         return result
         
     def chat(self):
