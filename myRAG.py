@@ -7,13 +7,17 @@ OLLAMA_HOST=127.0.0.1:11435 CUDA_VISIBLE_DEVICES=1 ollama serve >& ollama_server
 '''
 #}}
 #{{ Load packages
+# Repress deprecation warning
+import warnings
+# Suppress LangChain deprecation warnings
+# warnings.filterwarnings("ignore", category=DeprecationWarning)
+
 import os
 import readline #Make the input() function works better.
 from langchain_ollama import ChatOllama, OllamaEmbeddings
-from langchain.document_loaders import PyPDFLoader
+from langchain_community.document_loaders import PyPDFLoader
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_core.vectorstores import InMemoryVectorStore
-from langchain.document_loaders import PyPDFLoader
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_core.vectorstores import InMemoryVectorStore
 from langchain_chroma import Chroma
@@ -21,19 +25,22 @@ from langchain_core.runnables import RunnableLambda
 from langchain.memory import ConversationBufferMemory
 from langchain.prompts import PromptTemplate
 from langchain.prompts.chat import ChatPromptTemplate, SystemMessagePromptTemplate, HumanMessagePromptTemplate
-
-# Repress deprecation warning
-import warnings
-# Suppress LangChain deprecation warnings
-warnings.filterwarnings("ignore", category=DeprecationWarning)
+# from langchain_community.embeddings import HuggingFaceEmbeddings
+from langchain_huggingface import HuggingFaceEmbeddings
 #}}
 class RAG:
     #{{ init
     def __init__(self):
         print("RAG init....")
         
-        self.llm = ChatOllama(model="llama3.1:70b", base_url="http://localhost:11434")
-        self.embeddings = OllamaEmbeddings(model="mxbai-embed-large", base_url="http://localhost:11435")
+        # self.llm = ChatOllama(model="llama3.1:70b", base_url="http://localhost:11434")
+        # self.embeddings = OllamaEmbeddings(model="mxbai-embed-large", base_url="http://localhost:11435")
+        self.llm = ChatOllama(model="llama3.1:70b")
+        self.embeddings = HuggingFaceEmbeddings(
+            model_name="intfloat/e5-large-v2",
+            model_kwargs={"device": "cpu"},
+            encode_kwargs={"normalize_embeddings": True}
+        )
 
         #test
         assert self.llm.invoke("Hello")
@@ -45,7 +52,7 @@ class RAG:
     def data_lib_init(self):
         pdf_folder = "/vsc-hard-mounts/leuven-user/323/vsc32366/projects/LLM/RAG_data"
         persist_directory = '/vsc-hard-mounts/leuven-user/323/vsc32366/projects/LLM/Chroma_save'
-        documents = []
+        # documents = []
         if os.path.isdir(persist_directory):
             print("Found RAG library. Loading")
             self.vector_store = Chroma(
@@ -55,31 +62,39 @@ class RAG:
             )
         else:
             print(f"Prepare RAG library to folder: {persist_directory}")
-            for filename in os.listdir(pdf_folder):
-                if filename.endswith(".pdf"):
-                    print(f"Loading {filename}")
-                    loader = PyPDFLoader(os.path.join(pdf_folder, filename))
-                    docs = loader.load()
-                    documents.extend(docs)
-                    # Split Documents into Chunks
-            text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
-            texts = text_splitter.split_documents(documents)
-
             self.vector_store = Chroma(
                 collection_name="example_collection",
                 embedding_function=self.embeddings,
                 persist_directory=persist_directory,  # Where to save data locally, remove if not necessary
             )
-            self.vector_store.add_documents(texts)
+            text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
+            for filename in os.listdir(pdf_folder):
+                if filename.endswith(".pdf"):
+                    print(f"Loading {filename} ...", end='')
+                    loader = PyPDFLoader(os.path.join(pdf_folder, filename))
+                    docs = loader.load()
+                    print(f"Splitting...", end='')
+                    chunk = text_splitter.split_documents(docs)
+                    print(f"Embedding & saving...", end='')
+                    self.vector_store.add_documents(chunk)
+                    print("Done.")
     #}}
     #{{ Create retriver
     def retriver_init(self, k=5):
         self.retriever = self.vector_store.as_retriever(search_type="similarity", search_kwargs={"k": k})
-    
 
-    def custom_retreiver(self, query: str) -> str:
-        txt=self.retriever.get_relevant_documents(query)
-        return "".join([f"<doc id={i} >{x.page_content}</doc>" for i, x in enumerate(txt)])
+    # def custom_retreiver(self, query: str) -> str:
+    #     txt=self.retriever.invoke(query)
+    #     files=[]
+    #     pages=[]
+    #     texts=[]
+    #     for x in txt:
+    #         texts.append(x.page_content)
+    #         files.append(os.path.basename(x.metadata['source']))
+    #         pages.append(x.metadata['page_label'])
+        
+    #     return {'context': '\n'.join([f'<doc id={i} >\n{x.page_content}\n</doc>' for i, x in enumerate(texts)]),
+    #             'file': files, 'page':page}
     #}}
     #{{ Class for ConversationalRunnable
     class ConversationalRunnable(RunnableLambda):
@@ -115,7 +130,7 @@ class RAG:
             )
             system_template = """
 You are an AI assistant. 
-- Use <context> as the primary source. Each document is between <doc id=N> and </doc>, where N is the identify of this document.
+- Use <context> as the primary source. Each document is between <doc filename="FILENAME" page="PAGE"> and </doc>.
 - Use <chat_history> to maintain context.
 - Base answers on retrieved context; do not invent facts.
                     """
@@ -144,9 +159,12 @@ You are an AI assistant.
     #}}
     #{{ Chat function
     def ask(self, query:str) -> str:
-        retdoc = self.custom_retreiver(query, memory=self.chain.memory)
-        result = self.chain.invoke({"question": query, "context": retdoc})
-        return result.content
+        retdoc, retdoc_meta = self.custom_retreiver(query, memory=self.chain.memory)
+        result = self.chain.invoke({"question": query, "context": retdoc}).content
+        if retdoc_meta:
+            result = result + '\n\n_Reference:_\n' +\
+            "\n".join([f"- _{x['filename']} Page:{x['page']}_" for x in retdoc_meta])
+        return result
         
     def chat(self):
         print("Let talk :) (type 'bye' to quit)")
@@ -261,27 +279,33 @@ Output format:
     #}}
     #{{ Reload custom_retreiver
     def custom_retreiver(self, query: str, memory) -> str:
+        def parse_doc(txt):
+            filename = os.path.basename(txt.metadata["source"])
+            page = txt.metadata["page_label"]
+            return {'context': f'<doc filename="{filename}" page="{page}"  >\n{txt.page_content}\n</doc>',
+                 'filename': filename, 'page': page}
+            
         if not(self.QA_need_retrival(query, memory=memory)):
-            return "No context needed."
+            return ("No context needed.", [])
         print("Retrival...")
-        squerys=self.QA_rewrite_question_for_retrival(query, memory=memory)
-        doc=set()
+        squerys = self.QA_rewrite_question_for_retrival(query, memory=memory)
+        doc = {}
         for squery in squerys.splitlines():
             baddoc=set()
             print(f"Retrival quest: {squery}")
-            txt=self.retriever.get_relevant_documents(squery)
+            txt = list(map(parse_doc, self.retriever.invoke(squery)))
             for i, x in enumerate(txt):
-                print(f"Check doc {i}...", end='')
-                if (x.page_content in doc) or (x.page_content in baddoc):
+                print(f"Check doc {x['filename']} p.{x['page']}...", end='')
+                if (x['context'] in doc) or (x['context'] in baddoc):
                     print("Duplicate.")
-                elif self.QA_if_doc_relevant_to_question(squery, x.page_content, memory=memory):
-                    doc.add(x.page_content)
+                elif self.QA_if_doc_relevant_to_question(squery, x['context'], memory=memory):
+                    doc[x['context']]=x
                     print("Relevant.")
                 else:
-                    baddoc.add(x.page_content)
+                    baddoc.add(x['context'])
                     print("Not relevant.")
 
-        return "\n".join([f"<doc id={i} >{x}</doc>" for i, x in enumerate(doc)])
+        return ("\n".join([x['context'] for x in doc.values()]), list(doc.values()))
     #}}
 if __name__ == "__main__":
     rag=RAG()
