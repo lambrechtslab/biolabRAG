@@ -30,6 +30,7 @@ from langchain_huggingface import HuggingFaceEmbeddings
 import time
 import threading
 import warnings
+import json
 #}}
 class RAG:
     #{{ init
@@ -81,7 +82,7 @@ class RAG:
                 embedding_function=self.embeddings,
                 persist_directory=persist_directory,  # Where to save data locally, remove if not necessary
             )
-            text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
+            text_splitter = RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=50)
             for filename in os.listdir(pdf_folder):
                 if filename.endswith(".pdf"):
                     print(f"Loading {filename} ...", end='')
@@ -188,8 +189,18 @@ You are an AI assistant.
         retdoc, retdoc_meta = self.custom_retreiver(query, memory=self.chain.memory)
         result = self.chain.invoke({"question": query, "context": retdoc}).content
         if retdoc_meta:
+            doc={}
+            for x in retdoc_meta:
+                if not(x['filename'] in doc):
+                    doc[x['filename']]=set()
+                doc[x['filename']].add(x['page'])
+
+            refstr=[]
+            for filename, pageset in doc.items():
+                refstr.append(filename+' (p.'+', '.join(sorted(pageset))+')')
+                
             result = result + '\n\n_References:_\n' +\
-            "\n".join([f"- _{x['filename']} Page:{x['page']}_" for x in retdoc_meta])
+                "\n".join([f"- _{x}_" for x in refstr])
         return result
         
     def chat(self):
@@ -310,6 +321,58 @@ Output format:
             warnings.warn(f"LLM unexpected output: ${decision}")
             return False
     #}}
+    #{{ QA if a list of documents are relevant
+    def QA_if_lis_of_docs_relevant_to_question(self, quest:str, docs:list, memory):
+        system_template = """
+You are a relevance classifier for a retrieval-augmented generation (RAG) system. 
+Your task is to decide whether each of the retrieved documents (see <RetrievedDocument>) is relevant to the user’s question (see <UserQuestion>). Each retrieved document is warped between <doc id=N> and </doc>, where N is 0,1,2...
+
+Decision rules:
+- Use the chat history (<ChatHistory>) to resolve pronouns, references, and context in the user’s latest question.  
+- Label "RELEVANT" if the document contains information that could help answer the question, 
+  even if partially or indirectly.
+- Label "NOT_RELEVANT" if the document does not provide useful information for answering the question.
+
+Output strictly in JSON format as a list of objects. No any other contents.
+Output format example:
+[
+  {{"id": 0, "relevance": "NOT_RELEVANT"}},
+  {{"id": 1, "relevance": "RELEVANT"}},
+  {{"id": 2, "relevance": "NOT_RELEVANT"}},
+  ...
+]
+        """
+        system_prompt = SystemMessagePromptTemplate.from_template(system_template)
+        human_template = """
+<ChatHistory>
+{chat_history}
+</ChatHistory>
+        
+<UserQuestion>
+{question}
+</UserQuestion>
+
+<RetrievedDocument>
+{retrieved_document}
+</RetrievedDocument>
+        """
+        human_prompt = HumanMessagePromptTemplate.from_template(human_template)
+        chat_history = memory.load_memory_variables({})["chat_history"]
+        doc = '\n'.join([f"<doc id={i}>\n{x['context']}\n</doc>" for i, x in enumerate(docs)])
+        decision = self.llm.invoke(ChatPromptTemplate.from_messages([system_prompt, human_prompt])
+                               .format_prompt(question=quest, retrieved_document=doc, chat_history=chat_history).to_messages()).content
+        index=[]
+        try:
+            t = json.loads(decision)
+        except Exception as e:
+            warnings.warn(f"Error in parse below JSON:\n{decision}\nError: {e.message}")
+            return []
+            
+        for x in t:
+            if x['relevance']=="RELEVANT":
+                index.append(int(x['id']))
+        return sorted(index)
+    #}}
     #{{ Reload custom_retreiver
     def custom_retreiver(self, query: str, memory) -> str:
         def parse_doc(txt):
@@ -324,19 +387,26 @@ Output format:
         squerys = self.QA_rewrite_question_for_retrival(query, memory=memory)
         doc = {}
         for squery in squerys.splitlines():
-            baddoc=set()
+            # baddoc=set()
             print(f"Retrival quest: {squery}")
             txt = list(map(parse_doc, self.retriever.invoke(squery)))
-            for i, x in enumerate(txt):
-                print(f"Check doc {x['filename']} p.{x['page']}...", end='')
-                if (x['context'] in doc) or (x['context'] in baddoc):
-                    print("Duplicate.")
-                elif self.QA_if_doc_relevant_to_question(squery, x['context'], memory=memory):
-                    doc[x['context']]=x
-                    print("Relevant.")
-                else:
-                    baddoc.add(x['context'])
-                    print("Not relevant.")
+            txt =[ x for x in txt if not(x['context'] in doc) ]
+            print(f"{len(txt)} nonduplicated document(s) are found.")
+            if txt:
+                l = self.QA_if_lis_of_docs_relevant_to_question(query, docs=txt, memory=memory)
+                print(f"{len(l)} document(s) are relavent.")
+                for i in l:
+                    doc[txt[i]['context']]=txt[i]
+            # for i, x in enumerate(txt):
+            #     print(f"Check doc {x['filename']} p.{x['page']}...", end='')
+            #     if (x['context'] in doc) or (x['context'] in baddoc):
+            #         print("Duplicate.")
+            #     elif self.QA_if_doc_relevant_to_question(squery, x['context'], memory=memory):
+            #         doc[x['context']]=x
+            #         print("Relevant.")
+            #     else:
+            #         baddoc.add(x['context'])
+            #         print("Not relevant.")
 
         return ("\n".join([x['context'] for x in doc.values()]), list(doc.values()))
     #}}
