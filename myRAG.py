@@ -27,6 +27,9 @@ from langchain.prompts import PromptTemplate
 from langchain.prompts.chat import ChatPromptTemplate, SystemMessagePromptTemplate, HumanMessagePromptTemplate
 # from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_huggingface import HuggingFaceEmbeddings
+import time
+import threading
+import warnings
 #}}
 class RAG:
     #{{ init
@@ -47,6 +50,17 @@ class RAG:
         print("LLM test OK.")
         assert self.embeddings.embed_query("Hello")
         print("Embeddings test OK.")
+        threading.Thread(target=self.keep_warm, args=(300,), daemon=True).start() #Keep LLM warm.
+    #}}
+    #{{ Keep LLM warm
+    def keep_warm(self, interval: int = 300):
+        """Send a ping to Ollama every `interval` seconds."""
+        while True:
+            try:
+                _ = self.llm.invoke("ping")  # dummy prompt
+            except Exception as e:
+                print("Keep-warm failed:", e)
+            time.sleep(interval)
     #}}
     #{{ Function for saving data to lib
     def data_lib_init(self):
@@ -128,24 +142,24 @@ class RAG:
                 SystemMessagePromptTemplate,
                 HumanMessagePromptTemplate
             )
-#             system_template = """
-# You are an AI assistant. 
-# - Use <context> as the primary source. Each document is between <doc filename="FILENAME" page="PAGE"> and </doc>.
-# - Use <chat_history> to maintain context.
-# - Base answers on retrieved context; do not invent facts.
-#                     """
             system_template = """
 You are an AI assistant. 
-- Use <context> as the primary source. Each document is between <doc filename="FILE_NAME" page="PAGE"> and </doc>.
-- Base answers only on retrieved context; do not invent facts.
-- Insert concise citation markers like **[1]**, **[2]**, etc. directly after the relevant statement.
-- If there are any citations, at the end of your answer, add a "References" section that lists each citation number with the corresponding file name and page in the format:
-  **[1]** FILE_NAME p.PAGE
-  **[2]** FILE_NAME p.PAGE
-- If multiple passages support the same point, list all relevant sources under the same number.
-- If no relevant information is found in <context>, say you don't know.
-- Use <chat_history> to maintain conversation context.
-"""
+- Use <context> as the primary source. Each document is between <doc filename="FILENAME" page="PAGE"> and </doc>.
+- Use <chat_history> to maintain context.
+- Base answers on retrieved context; do not invent facts.
+                    """
+#             system_template = """
+# You are an AI assistant. 
+# - Use <context> as the primary source. Each document is between <doc filename="FILE_NAME" page="PAGE"> and </doc>.
+# - Base answers only on retrieved context; do not invent facts.
+# - Insert concise citation markers like **[1]**, **[2]**, etc. directly after the relevant statement.
+# - If there are any citations, at the end of your answer, add a "References" section that lists each citation number with the corresponding file name and page in the format:
+#   **[1]** FILE_NAME p.PAGE
+#   **[2]** FILE_NAME p.PAGE
+# - If multiple passages support the same point, list all relevant sources under the same number.
+# - If no relevant information is found in <context>, say you don't know.
+# - Use <chat_history> to maintain conversation context.
+# """
             system_prompt = SystemMessagePromptTemplate.from_template(system_template)
             human_template = """
 <context>
@@ -173,9 +187,9 @@ You are an AI assistant.
     def ask(self, query:str) -> str:
         retdoc, retdoc_meta = self.custom_retreiver(query, memory=self.chain.memory)
         result = self.chain.invoke({"question": query, "context": retdoc}).content
-        # if retdoc_meta:
-        #     result = result + '\n\n_Reference:_\n' +\
-        #     "\n".join([f"- _{x['filename']} Page:{x['page']}_" for x in retdoc_meta])
+        if retdoc_meta:
+            result = result + '\n\n_References:_\n' +\
+            "\n".join([f"- _{x['filename']} Page:{x['page']}_" for x in retdoc_meta])
         return result
         
     def chat(self):
@@ -286,8 +300,15 @@ Output format:
         """
         human_prompt = HumanMessagePromptTemplate.from_template(human_template)
         chat_history = memory.load_memory_variables({})["chat_history"]
-        return self.llm.invoke(ChatPromptTemplate.from_messages([system_prompt, human_prompt])
-                               .format_prompt(question=quest, retrieved_document=doc, chat_history=chat_history).to_messages()).content == "RELEVANT"
+        decision = self.llm.invoke(ChatPromptTemplate.from_messages([system_prompt, human_prompt])
+                               .format_prompt(question=quest, retrieved_document=doc, chat_history=chat_history).to_messages()).content
+        if decision == "RELEVANT":
+            return True
+        elif decision == "NOT_RELEVANT":
+            return False
+        else:
+            warnings.warn(f"LLM unexpected output: ${decision}")
+            return False
     #}}
     #{{ Reload custom_retreiver
     def custom_retreiver(self, query: str, memory) -> str:
