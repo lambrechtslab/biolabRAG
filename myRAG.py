@@ -51,7 +51,7 @@ class RAG:
         print("LLM test OK.")
         assert self.embeddings.embed_query("Hello")
         print("Embeddings test OK.")
-        threading.Thread(target=self.keep_warm, args=(300,), daemon=True).start() #Keep LLM warm.
+        threading.Thread(target=self.keep_warm, args=(60,), daemon=True).start() #Keep LLM warm.
     #}}
     #{{ Keep LLM warm
     def keep_warm(self, interval: int = 300):
@@ -66,7 +66,7 @@ class RAG:
     #{{ Function for saving data to lib
     def data_lib_init(self):
         pdf_folder = "/vsc-hard-mounts/leuven-user/323/vsc32366/projects/LLM/RAG_data"
-        persist_directory = '/vsc-hard-mounts/leuven-user/323/vsc32366/projects/LLM/Chroma_save'
+        persist_directory = '/vsc-hard-mounts/leuven-user/323/vsc32366/projects/LLM/Chroma_save_big'
         # documents = []
         if os.path.isdir(persist_directory):
             print("Found RAG library. Loading")
@@ -186,6 +186,10 @@ You are an AI assistant.
     #}}
     #{{ Chat function
     def ask(self, query:str) -> str:
+        if query.strip() == "new":
+            self.chain.memory.clear()
+            return "Chat memory cleared."
+            
         retdoc, retdoc_meta = self.custom_retreiver(query, memory=self.chain.memory)
         result = self.chain.invoke({"question": query, "context": retdoc}).content
         if retdoc_meta:
@@ -248,19 +252,16 @@ Output format:
     #{{ QA rewrite user's question for retrival
     def QA_rewrite_question_for_retrival(self, quest:str, memory):
         system_template = """
-You are a query rewriter for a Retrieval-Augmented Generation (RAG) system. 
-Your task is to rewrite the user’s latest question (see <UserQuestion>) into one or more clear, self-contained search queries 
-that are optimized for semantic similarity search using embeddings.
+You are a query rewriter for a Retrieval-Augmented Generation (RAG) system.
+Your task is to rewrite the user’s latest question (<UserQuestion>) into one or more clear, self-contained, and nonredundant search queries optimized for semantic similarity search using embeddings.
 
 Guidelines:
-- Use the chat history (<ChatHistory>) to resolve pronouns, references, and context in the user’s latest question.
+- Use the chat history (<ChatHistory>) to resolve pronouns, references, and context when it is relevant to the latest question.
 - Preserve the user’s original intent.
 - When useful, break the question into multiple sub-queries that capture different aspects of the information need.
-- You may also generate "step-back" queries (broader or higher-level versions of the question) to improve retrieval coverage.
-- Make the queries explicit and unambiguous (expand pronouns and vague references).
-- Remove polite phrases or conversational fluff.
-- Be concise and focus only on the key information to retrieve.
-- Do not add information not present in the chat history or user’s question.
+- Optionally include “step-back” queries (broader or higher-level versions) to improve retrieval coverage.
+- Make queries explicit, unambiguous, and sufficiently detailed to capture the user’s intent, while avoiding redundancy or irrelevant words.
+- Do not invent details not present in the user’s input or chat history.
 
 Output:
 Provide the rewritten queries as plain text, each query on its own line, with no numbering or bullets. Do not output explanations.
@@ -387,13 +388,15 @@ Output format example:
         squerys = self.QA_rewrite_question_for_retrival(query, memory=memory)
         doc = {}
         for squery in squerys.splitlines():
+            if not(squery.strip()):
+                continue
             # baddoc=set()
             print(f"Retrival quest: {squery}")
             txt = list(map(parse_doc, self.retriever.invoke(squery)))
             txt =[ x for x in txt if not(x['context'] in doc) ]
             print(f"{len(txt)} nonduplicated document(s) are found.")
             if txt:
-                l = self.QA_if_lis_of_docs_relevant_to_question(query, docs=txt, memory=memory)
+                l = self.QA_if_lis_of_docs_relevant_to_question(squery, docs=txt, memory=memory)
                 print(f"{len(l)} document(s) are relavent.")
                 for i in l:
                     doc[txt[i]['context']]=txt[i]
