@@ -188,7 +188,13 @@ You are an AI assistant.
     def ask(self, query:str) -> str:
         if query.strip() == "new":
             self.chain.memory.clear()
-            return "Chat memory cleared."
+            return "OK, let's start a new chat."
+        elif query.strip() == "ping":
+            try:
+                _ = self.llm.invoke("ping")  # dummy prompt
+                return "Yes, yes, I'm still alive."
+            except Exception as e:
+                return f"Ping failed: {e}"
             
         retdoc, retdoc_meta = self.custom_retreiver(query, memory=self.chain.memory)
         result = self.chain.invoke({"question": query, "context": retdoc}).content
