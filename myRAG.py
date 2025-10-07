@@ -27,6 +27,7 @@ from langchain.prompts import PromptTemplate
 from langchain.prompts.chat import ChatPromptTemplate, SystemMessagePromptTemplate, HumanMessagePromptTemplate
 # from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_huggingface import HuggingFaceEmbeddings
+from sentence_transformers import CrossEncoder
 import time
 import threading
 import warnings
@@ -45,13 +46,18 @@ class RAG:
             model_kwargs={"device": "cpu"},
             encode_kwargs={"normalize_embeddings": True}
         )
+        self.crossencoder = self.CrossEncoder()
 
         #test
         assert self.llm.invoke("Hello")
         print("LLM test OK.")
         assert self.embeddings.embed_query("Hello")
         print("Embeddings test OK.")
+        assert self.crossencoder.model.predict([("How many people live in Berlin?", "Berlin had a population of 3,520,031 registered inhabitants in an area of 891.82 square kilometers.")])
+        print("Cross Encoder test OK.")
+        
         threading.Thread(target=self.keep_warm, args=(60,), daemon=True).start() #Keep LLM warm.
+        
     #}}
     #{{ Keep LLM warm
     def keep_warm(self, interval: int = 300):
@@ -95,7 +101,7 @@ class RAG:
                     print("Done.")
     #}}
     #{{ Create retriver
-    def retriver_init(self, k=10):
+    def retriver_init(self, k=30):
         self.retriever = self.vector_store.as_retriever(search_type="similarity", search_kwargs={"k": k})
 
     # def custom_retreiver(self, query: str) -> str:
@@ -181,7 +187,7 @@ You are an AI assistant.
     #{{ readly
     def ready(self):
         self.data_lib_init()
-        self.retriver_init(10)
+        self.retriver_init()
         self.chain=self.ConversationalRunnable(self.llm)
     #}}
     #{{ Chat function
@@ -380,44 +386,50 @@ Output format example:
                 index.append(int(x['id']))
         return sorted(index)
     #}}
+    #{{ QA use cross-encoder
+    class CrossEncoder:
+        def __init__(self):
+            self.model = CrossEncoder(model_name="cross-encoder/ms-marco-MiniLM-L-6-v2",
+                                      device="cpu")
+        
+        def predict_score(self, query, docs):
+            pairs = [(query, doc['context']) for doc in docs]
+            scores = self.model.predict(pairs)
+            # reranked = sorted(zip(docs, scores), key=lambda x: x[1], reverse=True)
+            # return [doc for doc, _ in reranked[:self.top_n]]
+            return scores
+    #}}
     #{{ Reload custom_retreiver
+    def parse_doc(self, doc):
+        filename = os.path.basename(doc.metadata["source"])
+        page = doc.metadata["page_label"]
+        return {'context': f'<doc filename="{filename}" page="{page}"  >\n{doc.page_content}\n</doc>',
+             'filename': filename, 'page': page}
+    
     def custom_retreiver(self, query: str, memory) -> str:
-        def parse_doc(txt):
-            filename = os.path.basename(txt.metadata["source"])
-            page = txt.metadata["page_label"]
-            return {'context': f'<doc filename="{filename}" page="{page}"  >\n{txt.page_content}\n</doc>',
-                 'filename': filename, 'page': page}
-            
         if not(self.QA_need_retrival(query, memory=memory)):
             return ("No context needed.", [])
         print("Retrival...")
         squerys = self.QA_rewrite_question_for_retrival(query, memory=memory)
-        doc = {}
+        doc_pool = {}
         for squery in squerys.splitlines():
             if not(squery.strip()):
                 continue
             # baddoc=set()
             print(f"Retrival quest: {squery}")
-            txt = list(map(parse_doc, self.retriever.invoke(squery)))
-            txt =[ x for x in txt if not(x['context'] in doc) ]
-            print(f"{len(txt)} nonduplicated document(s) are found.")
-            if txt:
-                l = self.QA_if_lis_of_docs_relevant_to_question(squery, docs=txt, memory=memory)
-                print(f"{len(l)} document(s) are relavent.")
-                for i in l:
-                    doc[txt[i]['context']]=txt[i]
-            # for i, x in enumerate(txt):
-            #     print(f"Check doc {x['filename']} p.{x['page']}...", end='')
-            #     if (x['context'] in doc) or (x['context'] in baddoc):
-            #         print("Duplicate.")
-            #     elif self.QA_if_doc_relevant_to_question(squery, x['context'], memory=memory):
-            #         doc[x['context']]=x
-            #         print("Relevant.")
-            #     else:
-            #         baddoc.add(x['context'])
-            #         print("Not relevant.")
-
-        return ("\n".join([x['context'] for x in doc.values()]), list(doc.values()))
+            docs = list(map(self.parse_doc, self.retriever.invoke(squery)))
+            docs =[ x for x in docs if not(x['context'] in doc_pool) ]
+            print(f"{len(docs)} nonduplicated document(s) are found.")
+            validcount = 0
+            if docs:
+                scores = self.crossencoder.predict_score(squery, docs)
+                for S, D in zip(scores, docs):
+                    if S > 0.5:
+                        validcount+=1
+                        doc_pool[D['context']]=D
+            print(f"{validcount} documents are relavant.")
+                        
+        return ("\n".join([x['context'] for x in doc_pool.values()]), list(doc_pool.values()))
     #}}
 if __name__ == "__main__":
     rag=RAG()
