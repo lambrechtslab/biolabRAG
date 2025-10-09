@@ -22,7 +22,8 @@ from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_core.vectorstores import InMemoryVectorStore
 from langchain_chroma import Chroma
 from langchain_core.runnables import RunnableLambda
-from langchain.memory import ConversationBufferMemory
+# from langchain.memory import ConversationBufferMemory
+from langchain.memory import ConversationTokenBufferMemory
 from langchain.prompts import PromptTemplate
 from langchain.prompts.chat import ChatPromptTemplate, SystemMessagePromptTemplate, HumanMessagePromptTemplate
 # from langchain_community.embeddings import HuggingFaceEmbeddings
@@ -32,28 +33,42 @@ import time
 import threading
 import warnings
 import json
+import numpy as np
+def sigmoid(x):
+    return (1/(1 + np.exp(-np.array(x)))).tolist()
 #}}
 class RAG:
     #{{ init
-    def __init__(self):
+    def __init__(self, num_ctx:int=16384, crossencoder_normscore_cutoff:float=0.6, crossencoder_normscore_cutoff_loose:float=0.3):
+        self.num_ctx = num_ctx
+        self.chat_history_num_ctx = round(self.num_ctx / 3)
+        self.doc_num_ctx = round(self.num_ctx / 2)
+        self.crossencoder_normscore_cutoff = crossencoder_normscore_cutoff
+        self.crossencoder_normscore_cutoff_loose = crossencoder_normscore_cutoff_loose
+        
         print("RAG init....")
         
         # self.llm = ChatOllama(model="llama3.1:70b", base_url="http://localhost:11434")
         # self.embeddings = OllamaEmbeddings(model="mxbai-embed-large", base_url="http://localhost:11435")
-        self.llm = ChatOllama(model="llama3.1:70b")
+        self.llm = ChatOllama(model="llama3.1:70b",
+                              # num_ctx=131072,        # desired context window
+                              num_ctx=self.num_ctx,    # desired context window fastest: 8192; balanced: 16384 / 32768; max: 131072
+                              num_keep=256,            # keep system/instructions when sliding
+                              temperature=0)
         self.embeddings = HuggingFaceEmbeddings(
             model_name="intfloat/e5-large-v2",
             model_kwargs={"device": "cpu"},
             encode_kwargs={"normalize_embeddings": True}
         )
-        self.crossencoder = self.CrossEncoder()
+        self.crossencoder = CrossEncoder(model_name_or_path="cross-encoder/ms-marco-MiniLM-L-6-v2",
+                                      device="cpu")
 
         #test
         assert self.llm.invoke("Hello")
         print("LLM test OK.")
         assert self.embeddings.embed_query("Hello")
         print("Embeddings test OK.")
-        assert self.crossencoder.model.predict([("How many people live in Berlin?", "Berlin had a population of 3,520,031 registered inhabitants in an area of 891.82 square kilometers.")])
+        assert self.crossencoder.predict([("How many people live in Berlin?", "Berlin had a population of 3,520,031 registered inhabitants in an area of 891.82 square kilometers.")])
         print("Cross Encoder test OK.")
         
         threading.Thread(target=self.keep_warm, args=(60,), daemon=True).start() #Keep LLM warm.
@@ -119,27 +134,42 @@ class RAG:
     #}}
     #{{ Class for ConversationalRunnable
     class ConversationalRunnable(RunnableLambda):
-        def __init__(self, llm):
-            self.memory = ConversationBufferMemory(memory_key="chat_history", return_messages=True)
-            self.chat_template=self.get_chat_template()
-            self.llm=llm
+        def __init__(self, llm, max_token_limit=4000):
+            # Use token-aware memory
+            self.memory = ConversationTokenBufferMemory(
+                llm=llm,
+                memory_key="chat_history",
+                return_messages=True,
+                max_token_limit=max_token_limit
+            )
+            self.chat_template = self.get_chat_template()
+            self.llm = llm
 
         def invoke(self, inputs: dict) -> dict:
-            # Extract inputs
+            # Extract user inputs
             context = inputs.get("context", "")
             question = inputs.get("question", "")
+
+            # Load chat history from memory
             chat_history = self.memory.load_memory_variables({})["chat_history"]
 
-            # Format the prompt
-            formatted_prompt = self.chat_template.format_prompt(context=context, chat_history=chat_history, question=question).to_messages()
+            # Build the prompt messages
+            formatted_prompt = self.chat_template.format_prompt(
+                context=context,
+                chat_history=chat_history,
+                question=question
+            ).to_messages()
 
-            # Generate the response
+            # Get model response
             response = self.llm.invoke(formatted_prompt)
 
-            # Update memory with the new interaction
-            self.memory.save_context({"input": question}, {"output": response.content})
+            # Save interaction into memory (token-aware truncation happens automatically)
+            self.memory.save_context(
+                {"input": question},
+                {"output": response.content}
+            )
 
-            # Return the response and updated memory
+            # Return model response
             return response
 
         @staticmethod
@@ -188,7 +218,7 @@ You are an AI assistant.
     def ready(self):
         self.data_lib_init()
         self.retriver_init()
-        self.chain=self.ConversationalRunnable(self.llm)
+        self.chain=self.ConversationalRunnable(llm=self.llm)
     #}}
     #{{ Chat function
     def ask(self, query:str) -> str:
@@ -264,20 +294,32 @@ Output format:
     #{{ QA rewrite user's question for retrival
     def QA_rewrite_question_for_retrival(self, quest:str, memory):
         system_template = """
-You are a query rewriter for a Retrieval-Augmented Generation (RAG) system.
-Your task is to rewrite the user’s latest question (<UserQuestion>) into one or more clear, self-contained, and nonredundant search queries optimized for semantic similarity search using embeddings.
+You are a query rewriter and retrieval decision maker for a Retrieval-Augmented Generation (RAG) system.
+
+Your primary task is to rewrite the user’s latest question (<UserQuestion>) into one or more clear, self-contained, and nonredundant search queries optimized for semantic similarity search using embeddings.
+
+Your secondary task is to determine whether external retrieval is needed to answer the question.
 
 Guidelines:
-- Use the chat history (<ChatHistory>) to resolve pronouns, references, and context when it is relevant to the latest question.
-- Preserve the user’s original intent.
-- When useful, break the question into multiple sub-queries that capture different aspects of the information need.
-- Optionally include “step-back” queries (broader or higher-level versions) to improve retrieval coverage.
-- Make queries explicit, unambiguous, and sufficiently detailed to capture the user’s intent, while avoiding redundancy or irrelevant words.
-- Do not invent details not present in the user’s input or chat history.
+- Use the chat history (<ChatHistory>) to resolve pronouns, references, and context relevant to the latest question.
+- Preserve the user’s intent exactly — do not invent details.
+- When useful, break the question into multiple sub-queries capturing distinct aspects of the information need.
+- Optionally include broader “step-back” queries to improve retrieval coverage.
+- Make rewritten queries explicit, unambiguous, and sufficiently detailed.
+- If the user’s question can be fully answered from existing context (e.g., it’s a greeting, command, clarification, or instruction about the chat itself), then retrieval is **not needed**.
+- Never explain your reasoning or include any extra words.
+- Do not add punctuation, quotes, or introductory phrases.
+        
+Output Format:
+If retrieval is needed:
+RETRIEVE
+<query 1>
+<query 2>
+...
 
-Output:
-Provide the rewritten queries as plain text, each query on its own line, with no numbering or bullets. Do not output explanations.
-        """
+If retrieval is NOT needed:
+NO RETRIEVAL NEEDED
+"""
         system_prompt = SystemMessagePromptTemplate.from_template(system_template)
         human_template = """
 <ChatHistory>
@@ -290,7 +332,93 @@ Provide the rewritten queries as plain text, each query on its own line, with no
     """
         human_prompt = HumanMessagePromptTemplate.from_template(human_template)
         chat_history = memory.load_memory_variables({})["chat_history"]
-        return self.llm.invoke(ChatPromptTemplate.from_messages([system_prompt, human_prompt]).format_prompt(question=quest, chat_history=chat_history).to_messages()).content
+        out = self.llm.invoke(ChatPromptTemplate.from_messages([system_prompt, human_prompt]).format_prompt(question=quest, chat_history=chat_history).to_messages()).content.strip()
+        if out == "NO RETRIEVAL NEEDED":
+            return None
+        else:
+            return out.removeprefix("RETRIEVE").strip().splitlines()
+                
+    #}}
+    #{{ QA 2nd retrival: rewrite user's question for retrival
+    def QA_2nd_rewrite_question_for_retrival(self, quest:str, memory, previous_queries:str|list[str], retrieved_results:str|list[str]):
+        system_template = """
+You are a decision-making module that determines whether additional information retrieval is needed.
+
+Use the following inputs:
+- <ChatHistory>: The full conversation so far.
+- <UserQuestion>: The user's most recent question.
+- <PreviousQueries>: Search queries already made (if any).
+- <RetrievedResults>: The content retrieved from previous queries.
+
+Your task:
+1. Decide whether to perform more retrieval.
+2. If retrieval is needed, propose one or more new queries. The new queries should be explicit, unambiguous, and sufficiently detailed.
+3. If not needed or hopeless, return an empty query list [].
+
+Decision rules:
+- "RETRIEVE": More or refined search is useful. Provide 1–3 new queries.
+- "NO_ADDITIONAL_RETRIEVAL_NEEDED": Current information is sufficient.
+- "RETRIEVAL_HOPELESS": No realistic query can improve the answer.
+
+Output strictly in JSON format as a list of objects. No any other contents.
+Output format example:
+{{
+  "decision": "RETRIEVE" | "NO_ADDITIONAL_RETRIEVAL_NEEDED" | "RETRIEVAL_HOPELESS",
+  "queries": ["list of new search queries, if any"],
+  "explanation": "brief reasoning for your decision (1–3 sentences)"
+}}
+
+Note:
+- Never include any text outside the JSON object.
+- The "explanation" is for internal reasoning only.
+"""
+        system_prompt = SystemMessagePromptTemplate.from_template(system_template)
+        human_template = """
+<ChatHistory>
+{chat_history}
+</ChatHistory>
+
+<UserQuestion>
+{question}
+</UserQuestion>
+
+<PreviousQueries>
+{previous_queries}
+</PreviousQueries>
+        
+<RetrievedResults>
+{retrieved_results}
+</RetrievedResults>
+    """
+        human_prompt = HumanMessagePromptTemplate.from_template(human_template)
+        chat_history = memory.load_memory_variables({})["chat_history"]
+        
+        if type(previous_queries) is list:
+            previous_queries = "\n".join(previous_queries)
+            
+        if type(retrieved_results) is list:
+            retrieved_results = "\n".join(retrieved_results)
+
+        prompt = ChatPromptTemplate.from_messages([system_prompt, human_prompt]).format_prompt(question=quest, chat_history=chat_history, previous_queries=previous_queries, retrieved_results=retrieved_results)
+        # print(prompt)
+        tokennum = self.llm.get_num_tokens_from_messages(prompt.to_messages())
+        print(f"Token number: {tokennum}")
+        outstr = self.llm.invoke(prompt).content.strip()
+        try:
+            out = json.loads(outstr)
+        except Exception as e:
+            warnings.warn(f"Error in parse below JSON:\n{outstr}\nError: {e}")
+            return None
+
+        print(out['explanation'])
+        if out['decision'] == "NO_ADDITIONAL_RETRIEVAL_NEEDED":
+            return None
+        elif out['decision'] == "RETRIEVAL_HOPELESS":
+            print("Retrival hopeless. Give up.")
+            return None
+        else:
+            return out['queries']
+                
     #}}
     #{{ QA if tetrivalled documents is relevant
     def QA_if_doc_relevant_to_question(self, quest:str, doc:str, memory):
@@ -407,29 +535,80 @@ Output format example:
              'filename': filename, 'page': page}
     
     def custom_retreiver(self, query: str, memory) -> str:
-        if not(self.QA_need_retrival(query, memory=memory)):
-            return ("No context needed.", [])
-        print("Retrival...")
+        # if not(self.QA_need_retrival(query, memory=memory)):
+        #     return ("No context needed.", [])
         squerys = self.QA_rewrite_question_for_retrival(query, memory=memory)
-        doc_pool = {}
-        for squery in squerys.splitlines():
+        if not squerys:
+            return ("No context needed.", [])
+        
+        print("Retrieval...")
+        docs = []
+        squerys_dup = []
+        for squery in squerys:
             if not(squery.strip()):
                 continue
-            # baddoc=set()
-            print(f"Retrival quest: {squery}")
-            docs = list(map(self.parse_doc, self.retriever.invoke(squery)))
-            docs =[ x for x in docs if not(x['context'] in doc_pool) ]
-            print(f"{len(docs)} nonduplicated document(s) are found.")
-            validcount = 0
-            if docs:
-                scores = self.crossencoder.predict_score(squery, docs)
-                for S, D in zip(scores, docs):
-                    if S > 0.5:
-                        validcount+=1
-                        doc_pool[D['context']]=D
-            print(f"{validcount} documents are relavant.")
+            t = self.retriever.invoke(squery)
+            docs.extend(t)
+            squerys_dup.extend([squery]*len(t))
+        assert len(docs) == len(squerys_dup)
+
+        docs = list(map(self.parse_doc, docs))
+        scores = sigmoid(self.crossencoder.predict([(x, y['context']) for x, y in zip(squerys_dup, docs)]))
+        doc_score_pool = {}
+        for D, S in zip(docs, scores):
+            if not (D['context'] in doc_score_pool and doc_score_pool[D['context']][1]>=S):
+                doc_score_pool[D['context']]=(D, S)
+            
+        docs_score_sorted = sorted(list(doc_score_pool.values()), key=lambda x: x[1], reverse=True)
+        print(f"{len(docs_score_sorted)} docs retrievaled.")
+
+        if docs_score_sorted[0][1] >= self.crossencoder_normscore_cutoff:
+            cutoff = self.crossencoder_normscore_cutoff
+        else: #In case no strong correlated doc is retrived
+            cutoff = self.crossencoder_normscore_cutoff_loose
+            
+        out_docs = []
+        P = 0
+        for D, S in docs_score_sorted:
+            tokennum = self.llm.get_num_tokens(D['context'])
+            if S < cutoff or P + tokennum > self.doc_num_ctx:
+                break
+            out_docs.append(D)
+            P += tokennum
+
+        print(f"{len(out_docs)} docs included. Lowest cross encoder score: {S}")
+        return ("\n".join([x['context'] for x in out_docs]), out_docs)
+    
+        # doc_pool = {}
+        # squery_ls = []
+
+        # for query_i in range(3):
+        #     print(f"Retrival round {query_i}")
+        #     for squery in squerys:
+        #         if not(squery.strip()):
+        #             continue
+        #         # baddoc=set()
+        #         squery_ls.append(squery)
+        #         print(f"Retrival quest: {squery}")
+        #         docs = list(map(self.parse_doc, self.retriever.invoke(squery)))
+        #         docs =[ x for x in docs if not(x['context'] in doc_pool) ]
+        #         print(f"{len(docs)} nonduplicated document(s) are found.")
+        #         validcount = 0
+        #         if docs:
+        #             scores = self.crossencoder.predict_score(squery, docs)
+        #             for S, D in zip(scores, docs):
+        #                 if S > 0.5:
+        #                     validcount+=1
+        #                     doc_pool[D['context']]=D
+        #         print(f"{validcount} documents are relavant.")
+
+        #     # squerys = self.QA_2nd_rewrite_question_for_retrival(query, memory=memory, previous_queries=squery_ls, retrieved_results=list(doc_pool)) # Unfinished
+        #     squerys = None # For debug
+        #     if not squerys:
+        #         print("Retrival finished.")
+        #         break
                         
-        return ("\n".join([x['context'] for x in doc_pool.values()]), list(doc_pool.values()))
+        # return ("\n".join([x['context'] for x in doc_pool.values()]), list(doc_pool.values()))
     #}}
 if __name__ == "__main__":
     rag=RAG()
