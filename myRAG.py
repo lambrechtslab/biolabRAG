@@ -12,7 +12,7 @@ import warnings
 # Suppress LangChain deprecation warnings
 # warnings.filterwarnings("ignore", category=DeprecationWarning)
 
-import os
+import os, re
 import readline #Make the input() function works better.
 from langchain_ollama import ChatOllama, OllamaEmbeddings
 from langchain_community.document_loaders import PyPDFLoader
@@ -33,6 +33,8 @@ import time
 import threading
 import warnings
 import json
+import requests
+from xml.etree import ElementTree as ET
 import numpy as np
 def sigmoid(x):
     return (1/(1 + np.exp(-np.array(x)))).tolist()
@@ -261,10 +263,10 @@ You are an AI assistant.
             answer = self.ask(query)
             print(f"\nBot: {answer}\n")
     #}}
-    #{{ QA if need retrival
+    #{{ QA if need retrival (not used)
     def QA_need_retrival(self, quest:str, memory):
         system_template = """
-You are a classifier. Decide whether a user’s question (see <UserQuestion>) should trigger retrieval from an external knowledge source. 
+You are a classifier. Decide whether a user’s question (see <UserQuestion>) should trigger retrieval from an external knowledge source.
 
 Decision rules:
 - Use the chat history (<ChatHistory>) to resolve pronouns, references, and context in the user’s latest question.  
@@ -420,7 +422,7 @@ Note:
             return out['queries']
                 
     #}}
-    #{{ QA if tetrivalled documents is relevant
+    #{{ QA if tetrivalled documents is relevant (not used)
     def QA_if_doc_relevant_to_question(self, quest:str, doc:str, memory):
         system_template = """
 You are a relevance classifier for a retrieval-augmented generation (RAG) system. 
@@ -462,7 +464,7 @@ Output format:
             warnings.warn(f"LLM unexpected output: ${decision}")
             return False
     #}}
-    #{{ QA if a list of documents are relevant
+    #{{ QA if a list of documents are relevant (not used)
     def QA_if_lis_of_docs_relevant_to_question(self, quest:str, docs:list, memory):
         system_template = """
 You are a relevance classifier for a retrieval-augmented generation (RAG) system. 
@@ -527,14 +529,190 @@ Output format example:
             # return [doc for doc, _ in reranked[:self.top_n]]
             return scores
     #}}
+    #{{ QA if need PubMed search
+    def QA_if_need_pubmed_search(self, quest:str, memory, retrieved_docs:list[dict]):
+        system_template = """
+You are an expert biomedical research assistant operating inside a Retrieval-Augmented Generation (RAG) system. 
+Your primary role is to determine whether additional retrieval from PubMed is necessary to accurately and comprehensively answer the user's question. 
+If retrieval *is* needed, you must produce two key outputs:
+
+1. A concise, well-structured search query string suitable for the PubMed E-Utilities API:
+   https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi
+2. A short, descriptive text summarizing the information need. This text will later be used by a cross-encoder to assess the relevance of retrieved chunks.
+
+You will receive the following inputs:
+- <ChatHistory>: The full conversation history so far.
+- <UserQuestion>: The user’s most recent question.
+- <RetrievedResults>: Any content retrieved from previous PubMed queries.
+
+---
+
+### Guidelines for PubMed Query Construction
+- Always construct clear, specific, and concise queries using biomedical terminology.
+- Focus queries on key entities, conditions, mechanisms, interventions, or relationships explicitly or implicitly mentioned in the user’s question.
+- Avoid unnecessary words, stopwords, or overly broad terms.
+- If the user question is ambiguous, err on the side of broader but still relevant terms and note the ambiguity in the "notes" field.
+
+---
+
+Your final output **must be a valid JSON object** following the schema described in the human prompt. No any other texts.
+"""
+        system_prompt = SystemMessagePromptTemplate.from_template(system_template)
+        human_template = """
+You are given the following inputs:
+
+<ChatHistory>
+{chat_history}
+</ChatHistory>
+
+<UserQuestion>
+{question}
+</UserQuestion>
+
+<RetrievedResults>
+{retrieved_results}
+</RetrievedResults>
+
+---
+
+### Your Task
+
+1. **Assess sufficiency of retrieved context:**  
+   Decide whether the information in <RetrievedResults> is adequate to answer <UserQuestion> accurately, comprehensively, and with scientific rigor.
+
+2. **Determine retrieval need:**  
+   - If the context is sufficient, set `"needs_pubmed_search": false`.
+   - If it is insufficient, incomplete, outdated, or irrelevant, set `"needs_pubmed_search": true`.
+
+3. **If retrieval is needed:**  
+   - Generate a high-quality PubMed query string (`pubmed_query_term`) following the construction guidelines.
+   - Provide a short, clear `description` summarizing the intended information need (for cross-encoder filtering).
+   - Optionally, include a `"notes"` field if there is ambiguity, missing context, or other special considerations.
+
+---
+
+### Output Format
+
+Your response **must be a valid JSON object** and follow exactly one of the following structures:
+{{
+  "needs_pubmed_search": false
+}}
+
+Or:
+{{
+  "needs_pubmed_search": true,
+  "pubmed_query_term": "concise query for PubMed",
+  "description": "short description of the information need"
+}}
+
+Or:
+{{
+  "needs_pubmed_search": true,
+  "pubmed_query_term": "concise query for PubMed",
+  "description": "short description of the information need",
+  "notes": "optional explanation of ambiguity, missing context, or other special considerations"
+}}
+"""
+        human_prompt = HumanMessagePromptTemplate.from_template(human_template)
+        chat_history = memory.load_memory_variables({})["chat_history"]
+        retrieved_results = "\n".join(x['context'] for x in retrieved_docs)
+        prompt = ChatPromptTemplate.from_messages([system_prompt, human_prompt]).format_prompt(question=quest, chat_history=chat_history, retrieved_results=retrieved_results)
+        outstr = self.llm.invoke(prompt).content.strip()
+        match = re.search(r'\{.*\}', outstr, re.DOTALL)
+        if match:
+            out = json.loads(match.group(0))
+        else:
+            warnings.warn(f"Error in parse below JSON:\n{outstr}\nError: {e}")
+            return None
+    
+        if 'notes' in out:
+            print(out['notes'])
+        if not out['needs_pubmed_search']:
+            return None
+        else:
+            return (out['pubmed_query_term'], out['description'])
+                
+    #}}
+    #{{ PubMed search
+    def pubmed_search(self, term:str):
+        # Search PMC IDs
+        base_url = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi"
+        params = {
+            "db": "pmc",                   # Search PubMed Central
+            "term": term,                  # Your query
+            "retmax": 10,                   # Max number of results
+            "retmode": "xml"               # Response format
+        }
+        response = requests.get(base_url, params=params)
+        root = ET.fromstring(response.content)
+        return [id_elem.text for id_elem in root.findall(".//Id")]
+
+    def pubmed_fetch_and_chop(self, pmc_id:str)->list[dict]:
+        efetch_url = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi"
+        params = {
+            "db": "pmc",
+            "id": pmc_id,
+            "retmode": "xml"
+        }
+        response = requests.get(efetch_url, params=params)
+        xml_data = response.content
+        root = ET.fromstring(xml_data)
+        # Extract title
+        title = root.findtext(".//article-title")
+        # Extract abstract text
+        abstract_texts = [elem.text for elem in root.findall(".//abstract//p")]
+        abstract = "\n".join(filter(None, abstract_texts))
+        # Extract main text body
+        body_paragraphs = [elem.text for elem in root.findall(".//body//p")]
+        body_text = "\n".join(filter(None, body_paragraphs))
+        
+        text_splitter = RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=50)
+        # text_splitter.split_text(str) ->list(str)
+
+        out=[]
+        for pg, chunk in enumerate(text_splitter.split_text(abstract) + text_splitter.split_text(body_text)):
+            page = 'c%.4d' % pg
+            t = {'context': f'<doc filename="{title}" page="{page}"  >\n{chunk}\n</doc>',
+                 'content': chunk, 'filename': title, 'page': page}
+            out.append(t)
+
+        return out
+    #}}
     #{{ Reload custom_retreiver
     def parse_doc(self, doc):
         filename = os.path.basename(doc.metadata["source"])
         page = doc.metadata["page_label"]
         return {'context': f'<doc filename="{filename}" page="{page}"  >\n{doc.page_content}\n</doc>',
-             'filename': filename, 'page': page}
+                'content': doc.page_content,
+                'filename': filename, 'page': page}
     
     def custom_retreiver(self, query: str, memory) -> str:
+        def fill_docs_to_context(docs:list[dict], scores:list[float]):
+            doc_score_pool = {}
+            for D, S in zip(docs, scores):
+                if not (D['context'] in doc_score_pool and doc_score_pool[D['context']][1]>=S):
+                    doc_score_pool[D['context']]=(D, S)
+
+            docs_score_sorted = sorted(list(doc_score_pool.values()), key=lambda x: x[1], reverse=True)
+            print(f"{len(docs_score_sorted)} docs retrievaled.")
+
+            if docs_score_sorted[0][1] >= self.crossencoder_normscore_cutoff:
+                cutoff = self.crossencoder_normscore_cutoff
+            else: #In case no strong correlated doc is retrived
+                cutoff = self.crossencoder_normscore_cutoff_loose
+
+            out_docs = []
+            P = 0
+            for D, S in docs_score_sorted:
+                tokennum = self.llm.get_num_tokens(D['context'])
+                if S < cutoff or P + tokennum > self.doc_num_ctx:
+                    break
+                out_docs.append(D)
+                P += tokennum
+
+            print(f"{len(out_docs)} docs included. Lowest cross encoder score: {S}")
+            return out_docs
+        
         # if not(self.QA_need_retrival(query, memory=memory)):
         #     return ("No context needed.", [])
         squerys = self.QA_rewrite_question_for_retrival(query, memory=memory)
@@ -553,62 +731,22 @@ Output format example:
         assert len(docs) == len(squerys_dup)
 
         docs = list(map(self.parse_doc, docs))
-        scores = sigmoid(self.crossencoder.predict([(x, y['context']) for x, y in zip(squerys_dup, docs)]))
-        doc_score_pool = {}
-        for D, S in zip(docs, scores):
-            if not (D['context'] in doc_score_pool and doc_score_pool[D['context']][1]>=S):
-                doc_score_pool[D['context']]=(D, S)
-            
-        docs_score_sorted = sorted(list(doc_score_pool.values()), key=lambda x: x[1], reverse=True)
-        print(f"{len(docs_score_sorted)} docs retrievaled.")
+        scores = sigmoid(self.crossencoder.predict([(x, y['content']) for x, y in zip(squerys_dup, docs)]))
+        out_docs = fill_docs_to_context(docs, scores)
 
-        if docs_score_sorted[0][1] >= self.crossencoder_normscore_cutoff:
-            cutoff = self.crossencoder_normscore_cutoff
-        else: #In case no strong correlated doc is retrived
-            cutoff = self.crossencoder_normscore_cutoff_loose
-            
-        out_docs = []
-        P = 0
-        for D, S in docs_score_sorted:
-            tokennum = self.llm.get_num_tokens(D['context'])
-            if S < cutoff or P + tokennum > self.doc_num_ctx:
-                break
-            out_docs.append(D)
-            P += tokennum
-
-        print(f"{len(out_docs)} docs included. Lowest cross encoder score: {S}")
+        pubmed_query = self.QA_if_need_pubmed_search(query, memory, out_docs)
+        if pubmed_query:
+            pquery, description = pubmed_query
+            print(f"PubMed query: {pquery}")
+            print(f"Description: {description}")
+            pmc_ids = self.pubmed_search(pquery)
+            pubmed_docs = []
+            for pmc_id in pmc_ids:
+                pubmed_docs.extend(self.pubmed_fetch_and_chop(pmc_id))
+            pubmed_scores = sigmoid(self.crossencoder.predict([(description, y['content']) for y in pubmed_docs]))
+            out_docs = fill_docs_to_context(docs + pubmed_docs, scores + pubmed_scores)
+        
         return ("\n".join([x['context'] for x in out_docs]), out_docs)
-    
-        # doc_pool = {}
-        # squery_ls = []
-
-        # for query_i in range(3):
-        #     print(f"Retrival round {query_i}")
-        #     for squery in squerys:
-        #         if not(squery.strip()):
-        #             continue
-        #         # baddoc=set()
-        #         squery_ls.append(squery)
-        #         print(f"Retrival quest: {squery}")
-        #         docs = list(map(self.parse_doc, self.retriever.invoke(squery)))
-        #         docs =[ x for x in docs if not(x['context'] in doc_pool) ]
-        #         print(f"{len(docs)} nonduplicated document(s) are found.")
-        #         validcount = 0
-        #         if docs:
-        #             scores = self.crossencoder.predict_score(squery, docs)
-        #             for S, D in zip(scores, docs):
-        #                 if S > 0.5:
-        #                     validcount+=1
-        #                     doc_pool[D['context']]=D
-        #         print(f"{validcount} documents are relavant.")
-
-        #     # squerys = self.QA_2nd_rewrite_question_for_retrival(query, memory=memory, previous_queries=squery_ls, retrieved_results=list(doc_pool)) # Unfinished
-        #     squerys = None # For debug
-        #     if not squerys:
-        #         print("Retrival finished.")
-        #         break
-                        
-        # return ("\n".join([x['context'] for x in doc_pool.values()]), list(doc_pool.values()))
     #}}
 if __name__ == "__main__":
     rag=RAG()
