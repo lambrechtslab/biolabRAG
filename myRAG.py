@@ -516,7 +516,7 @@ Output format example:
                 index.append(int(x['id']))
         return sorted(index)
     #}}
-    #{{ QA use cross-encoder
+    #{{ QA use cross-encoder (not used)
     class CrossEncoder:
         def __init__(self):
             self.model = CrossEncoder(model_name="cross-encoder/ms-marco-MiniLM-L-6-v2",
@@ -543,7 +543,7 @@ If retrieval *is* needed, you must produce two key outputs:
 You will receive the following inputs:
 - <ChatHistory>: The full conversation history so far.
 - <UserQuestion>: The user’s most recent question.
-- <RetrievedResults>: Any content retrieved from previous PubMed queries.
+- <RetrievedResults>: Any content retrieved from a local library (not from internet).
 
 ---
 
@@ -633,21 +633,22 @@ Or:
             return (out['pubmed_query_term'], out['description'])
                 
     #}}
-    #{{ PubMed search
-    def pubmed_search(self, term:str):
+    #{{ PubMed full text search
+    def pubmed_fulltext_search(self, term:str, num:int=10)->list[str]:
         # Search PMC IDs
         base_url = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi"
         params = {
             "db": "pmc",                   # Search PubMed Central
             "term": term,                  # Your query
-            "retmax": 10,                   # Max number of results
-            "retmode": "xml"               # Response format
+            "retmax": num,                   # Max number of results
+            "retmode": "xml",               # Response format
+            "sort": "relevance"
         }
         response = requests.get(base_url, params=params)
         root = ET.fromstring(response.content)
         return [id_elem.text for id_elem in root.findall(".//Id")]
 
-    def pubmed_fetch_and_chop(self, pmc_id:str)->list[dict]:
+    def pubmed_fulltext_fetch_and_chop(self, pmc_id:str)->(list[dict], dict):
         efetch_url = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi"
         params = {
             "db": "pmc",
@@ -659,6 +660,9 @@ Or:
         root = ET.fromstring(xml_data)
         # Extract title
         title = root.findtext(".//article-title")
+        if not title:
+            print(xml_data)
+            raise Exception("Cannot get ArticleTitle")
         # Extract abstract text
         abstract_texts = [elem.text for elem in root.findall(".//abstract//p")]
         abstract = "\n".join(filter(None, abstract_texts))
@@ -670,13 +674,70 @@ Or:
         # text_splitter.split_text(str) ->list(str)
 
         out=[]
-        for pg, chunk in enumerate(text_splitter.split_text(abstract) + text_splitter.split_text(body_text)):
-            page = 'c%.4d' % pg
+        for chunk in text_splitter.split_text(abstract):
+            page = 'abstract'
+            t = {'context': f'<doc filename="{title}" page="{page}"  >\n{chunk}\n</doc>',
+                 'content': chunk, 'filename': title, 'page': page}
+            out.append(t)
+        for chunk in text_splitter.split_text(body_text):
+            page = 'fulltext'
             t = {'context': f'<doc filename="{title}" page="{page}"  >\n{chunk}\n</doc>',
                  'content': chunk, 'filename': title, 'page': page}
             out.append(t)
 
-        return out
+        return (out, {'title': title, 'abstract': abstract, 'full_body_text': body_text})
+    #}}
+    #{{ PubMed abstract text search
+    def pubmed_abstract_search(self, term:str, num:int=10)->list[str]:
+        # Search PMC IDs
+        base_url = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi"
+        params = {
+            "db": "pubmed",                   # Search PubMed Central
+            "term": term,                  # Your query
+            "retmax": num,                   # Max number of results
+            "retmode": "xml",               # Response format
+            "sort": "relevance"
+        }
+        response = requests.get(base_url, params=params)
+        root = ET.fromstring(response.content)
+        return [id_elem.text for id_elem in root.findall(".//Id")]
+
+    def pubmed_abstract_fetch_and_chop(self, pm_id:str)->(list[dict], dict):
+        efetch_url = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi"
+        params = {
+            "db": "pubmed",
+            "id": pm_id,
+            "retmode": "xml"
+        }
+        response = requests.get(efetch_url, params=params)
+        xml_data = response.content
+        root = ET.fromstring(xml_data)
+        title = root.findtext(".//ArticleTitle")
+        if not title:
+            print(xml_data)
+            raise Exception("Cannot get ArticleTitle")
+        
+        abstract = " ".join([a.text for a in root.findall(".//AbstractText") if a.text])
+        pmcid = root.findtext(".//ArticleIdList/ArticleId[@IdType='pmc']")
+        
+        text_splitter = RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=50)
+        # text_splitter.split_text(str) ->list(str)
+
+        out=[]
+        for chunk in text_splitter.split_text(abstract):
+            page = 'abstract'
+            t = {'context': f'<doc filename="{title}" page="{page}"  >\n{chunk}\n</doc>',
+                 'content': chunk, 'filename': title, 'page': page}
+            out.append(t)
+
+        return (out, {'title': title, 'abstract': abstract, 'pmcid': pmcid})
+
+    def pubmed_fetch_and_chop(self, pm_id:str)->list[dict]:
+        docs, meta = self.pubmed_abstract_fetch_and_chop(pm_id)
+        if meta['pmcid']:
+            # print(f"Full text avaiable: {meta['pmcid']}")
+            docs, _ = self.pubmed_fulltext_fetch_and_chop(meta['pmcid'])
+        return docs
     #}}
     #{{ Reload custom_retreiver
     def parse_doc(self, doc):
@@ -703,14 +764,16 @@ Or:
 
             out_docs = []
             P = 0
+            pS = 0.0
             for D, S in docs_score_sorted:
                 tokennum = self.llm.get_num_tokens(D['context'])
                 if S < cutoff or P + tokennum > self.doc_num_ctx:
                     break
                 out_docs.append(D)
                 P += tokennum
+                pS = S
 
-            print(f"{len(out_docs)} docs included. Lowest cross encoder score: {S}")
+            print(f"{len(out_docs)} docs included. Lowest cross encoder score: {pS}")
             return out_docs
         
         # if not(self.QA_need_retrival(query, memory=memory)):
@@ -739,12 +802,36 @@ Or:
             pquery, description = pubmed_query
             print(f"PubMed query: {pquery}")
             print(f"Description: {description}")
-            pmc_ids = self.pubmed_search(pquery)
+            pm_ids = self.pubmed_abstract_search(pquery)
             pubmed_docs = []
-            for pmc_id in pmc_ids:
-                pubmed_docs.extend(self.pubmed_fetch_and_chop(pmc_id))
+            for pm_id in pm_ids:
+                pubmed_docs.extend(self.pubmed_fetch_and_chop(pm_id))
+                
+            #Strategy I: only compare to description
             pubmed_scores = sigmoid(self.crossencoder.predict([(description, y['content']) for y in pubmed_docs]))
-            out_docs = fill_docs_to_context(docs + pubmed_docs, scores + pubmed_scores)
+            
+            #Increase PubMed quary score
+            s_pubmed_docs = []
+            s_pubmed_scores = []
+            t = sorted(zip(pubmed_docs, pubmed_scores), key=lambda x: x[1], reverse=True)
+            for (i, (D, S)) in enumerate(t):
+                # I included at least 3 PubMed result in the context.
+                if i == 0: print(f"Highest PubMed relativity: {t[0][1]}")
+                if S > self.crossencoder_normscore_cutoff and i <= 3:
+                    S += 1.0
+                s_pubmed_docs.append(D)
+                s_pubmed_scores.append(S)
+            out_docs = fill_docs_to_context(docs + s_pubmed_docs, scores + s_pubmed_scores)
+            
+            # #Strategy II: compare to both description and previous RAG queries.
+            # pquery_doc_pair = []
+            # pubmed_docs_dup = []
+            # for A in [description]+squerys:
+            #     for B in pubmed_docs:
+            #         pubmed_docs_dup.append(B)
+            #         pquery_doc_pair.append((A, B['content']))
+            # pubmed_scores = sigmoid(self.crossencoder.predict(pquery_doc_pair))
+            # out_docs = fill_docs_to_context(docs + pubmed_docs_dup, scores + pubmed_scores)
         
         return ("\n".join([x['context'] for x in out_docs]), out_docs)
     #}}
