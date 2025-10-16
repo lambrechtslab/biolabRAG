@@ -673,10 +673,12 @@ Or:
         text_splitter = RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=50)
         # text_splitter.split_text(str) ->list(str)
 
-        out=[]
+        page = 'title'
+        out=[{'context': f'<doc filename="{title}" page="{page}"  >\n{abstract}\n</doc>',
+                 'content': title, 'filename': title, 'page': page}]
         for chunk in text_splitter.split_text(abstract):
             page = 'abstract'
-            t = {'context': f'<doc filename="{title}" page="{page}"  >\n{chunk}\n</doc>',
+            t = {'context': f'<doc filename="{title}" page="{page}"  >\n{abstract}\n</doc>',
                  'content': chunk, 'filename': title, 'page': page}
             out.append(t)
         for chunk in text_splitter.split_text(body_text):
@@ -723,10 +725,13 @@ Or:
         text_splitter = RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=50)
         # text_splitter.split_text(str) ->list(str)
 
-        out=[]
+        #If either title or any chunk of abstract is hitted, the whole abstract will be put in context.
+        page = 'title'
+        out=[{'context': f'<doc filename="{title}" page="{page}"  >\n{abstract}\n</doc>',
+                 'content': title, 'filename': title, 'page': page}]
         for chunk in text_splitter.split_text(abstract):
             page = 'abstract'
-            t = {'context': f'<doc filename="{title}" page="{page}"  >\n{chunk}\n</doc>',
+            t = {'context': f'<doc filename="{title}" page="{page}"  >\n{abstract}\n</doc>',
                  'content': chunk, 'filename': title, 'page': page}
             out.append(t)
 
