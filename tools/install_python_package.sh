@@ -1,0 +1,3 @@
+pip install langchain langchain-core langchain-ollama langchain-chroma \
+    sentence-transformers torch pydantic vllm chromadb pypdf ollama \
+    jupyter

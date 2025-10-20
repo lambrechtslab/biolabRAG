@@ -1,0 +1,47 @@
+import os
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain_community.document_loaders import PyPDFLoader
+from langchain_chroma import Chroma
+from langchain_huggingface import HuggingFaceEmbeddings
+
+pdf_folder = "/vsc-hard-mounts/leuven-user/323/vsc32366/projects/LLM/RAG_data"
+persist_directory = '/vsc-hard-mounts/leuven-user/323/vsc32366/projects/LLM/Chroma_save_1'
+
+embeddings = HuggingFaceEmbeddings(
+            model_name="intfloat/e5-large-v2",
+            model_kwargs={"device": "cpu"},
+            encode_kwargs={"normalize_embeddings": True}
+        )
+assert embeddings.embed_query("Hello")
+print("Embeddings test OK.")
+
+def batch(iterable, n=1):
+    l = len(iterable)
+    for ndx in range(0, l, n):
+        yield iterable[ndx:min(ndx + n, l)]
+max_batch_size = 5461
+
+if os.path.isdir(persist_directory):
+    print("Found RAG library. Quit.")
+else:
+    print(f"Prepare RAG library to folder: {persist_directory}")
+    vector_store = Chroma(
+        collection_name="example_collection",
+        embedding_function=embeddings,
+        persist_directory=persist_directory,  # Where to save data locally, remove if not necessary
+    )
+    text_splitter = RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=50)
+    for filename in os.listdir(pdf_folder):
+        if filename.endswith(".pdf"):
+            print(f"Loading {filename}")
+            loader = PyPDFLoader(os.path.join(pdf_folder, filename))
+            docs = loader.load()
+            print("... Splitting")
+            chunk = text_splitter.split_documents(docs)
+            print(f"{len(chunk) // max_batch_size + 1} batches... Embedding & saving")
+            for b in batch(chunk, max_batch_size):
+                vector_store.add_documents(b)
+            # vector_store.add_documents(chunk)
+            print("... Done.")
+    print("Library preparation finished.")
+    
