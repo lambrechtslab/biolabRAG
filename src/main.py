@@ -25,12 +25,13 @@ app.add_middleware(
 
 class Message(BaseModel):
     text: str
+    option: str
 
 @app.post("/chat")
 async def chat(message: Message):
     # Just echo back for demo
     print(f"Send message: {message.text}")
-    aws = rag.ask(message.text)
+    aws = rag.ask(message.text, retrival_option=message.option)
     print(f"Got answer: {aws}")
     return {"reply": aws}
     # return {"reply": f"You said: {message.text}"} #For debug

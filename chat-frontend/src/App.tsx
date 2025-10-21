@@ -12,6 +12,7 @@ interface Message {
 export default function App() {
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
+  const [selectedOption, setSelectedOption] = useState("localFirst");
   const bottomRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -29,7 +30,10 @@ export default function App() {
       const res = await fetch("http://localhost:8000/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ text: input }),
+          body: JSON.stringify({
+	      text: input,
+	      option: selectedOption,
+	  }),
       });
 
       if (!res.ok) throw new Error("Server error");
@@ -72,6 +76,38 @@ export default function App() {
         placeholder="Type your message..."
         />
         <button onClick={sendMessage}>Send</button>
+      </div>
+
+      {/* Radio button group */}
+      <div className="radio-group">
+	 Knowledge Source:
+	 <label>
+          <input
+            type="radio"
+            value="localFirst"
+            checked={selectedOption === "localFirst"}
+            onChange={(e) => setSelectedOption(e.target.value)}
+          />
+          Local First
+        </label>
+        <label>
+          <input
+            type="radio"
+            value="localOnly"
+            checked={selectedOption === "localOnly"}
+            onChange={(e) => setSelectedOption(e.target.value)}
+          />
+          Local Only
+        </label>
+        <label>
+          <input
+            type="radio"
+            value="PubMedOnly"
+            checked={selectedOption === "PubMedOnly"}
+            onChange={(e) => setSelectedOption(e.target.value)}
+          />
+          PubMed Only
+        </label>
       </div>
     </div>
   );
