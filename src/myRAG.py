@@ -63,7 +63,12 @@ class RAG:
         self.llm = ChatOllama(model="s10350330/openbiollm-llama3-70b.i1-q4_k_m.gguf",
                               num_ctx=self.num_ctx,
                               num_keep=256,            # keep system/instructions when sliding
-                              temperature=0)
+                              temperature=0.7,         # Slight creativity for fluent writing
+                              top_p=0.9,               # Diverse but focused sampling
+                              top_k=50,                # Helps content variety
+                              repetition_penalty=1.05, # Avoids loops without truncating
+                              num_predict=1800         # Ensures multi-paragraph output
+                              )
         self.embeddings = HuggingFaceEmbeddings(
             model_name="intfloat/e5-large-v2",
             model_kwargs={"device": "cpu"},
@@ -189,23 +194,13 @@ class RAG:
                 HumanMessagePromptTemplate
             )
             system_template = """
-You are an AI assistant. 
-- Use <context> as the primary source. Each document is between <doc filename="FILENAME" page="PAGE"> and </doc>.
-- Use <chat_history> to maintain context.
-- Base answers on retrieved context; do not invent facts.
-                    """
-#             system_template = """
-# You are an AI assistant. 
-# - Use <context> as the primary source. Each document is between <doc filename="FILE_NAME" page="PAGE"> and </doc>.
-# - Base answers only on retrieved context; do not invent facts.
-# - Insert concise citation markers like **[1]**, **[2]**, etc. directly after the relevant statement.
-# - If there are any citations, at the end of your answer, add a "References" section that lists each citation number with the corresponding file name and page in the format:
-#   **[1]** FILE_NAME p.PAGE
-#   **[2]** FILE_NAME p.PAGE
-# - If multiple passages support the same point, list all relevant sources under the same number.
-# - If no relevant information is found in <context>, say you don't know.
-# - Use <chat_history> to maintain conversation context.
-# """
+You are an AI assistant specialized in retrieval-augmented generation (RAG).
+
+Your task:
+1. Use ONLY the content inside <context> as your factual source. If some information is missing, say so clearly rather than guessing.
+2. Provide detailed, well-reasoned, and structured answers. Prefer depth over brevity — include context, explanations, examples, and relationships between ideas.
+3. Prefer short paragraphs and readable formatting over dense text. Use Markdown formatting for clarity. When listing points, ensure list items and subpoints appear on separate lines.
+"""
             system_prompt = SystemMessagePromptTemplate.from_template(system_template)
             human_template = """
 <context>
@@ -219,6 +214,11 @@ You are an AI assistant.
 <question>
 {question}
 </question>
+
+<output_format>
+Respond **only** in Markdown format.
+Include headings, bullet points, numbered lists, and bold/italic emphasis when appropriate.
+</output_format>
                     """
             human_prompt = HumanMessagePromptTemplate.from_template(human_template)
             return ChatPromptTemplate.from_messages([system_prompt, human_prompt])
@@ -544,6 +544,8 @@ Or:
     def custom_retreiver(self, query: str, memory, retrival_option:str="localFirst") -> str:
         assert retrival_option in ['localFirst', 'localOnly', 'PubMedOnly']
         def fill_docs_to_context(docs:list[dict], scores:list[float])->list[dict]:
+            if not docs:
+                return []
             doc_score_pool = {}
             for D, S in zip(docs, scores):
                 if not (D['context'] in doc_score_pool and doc_score_pool[D['context']][1]>=S):
