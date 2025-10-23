@@ -22,30 +22,85 @@ export default function App() {
   const sendMessage = async () => {
     if (!input.trim()) return;
 
-    const userMsg: Message = { sender: "user", text: input };
+    const messageToSend = input;
+    const userMsg: Message = { sender: "user", text: messageToSend };
     setMessages((prev) => [...prev, userMsg]);
     setInput("");
 
     try {
+      setMessages((prev) => [...prev, { sender: "bot", text: "" }]);
+
       const res = await fetch("http://localhost:8000/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-	      text: input,
-	      option: selectedOption,
-	  }),
+              text: messageToSend,
+              option: selectedOption,
+          }),
       });
 
-      if (!res.ok) throw new Error("Server error");
-      const data = await res.json();
+      if (!res.ok || !res.body) throw new Error("Server error");
 
-      const botMsg: Message = { sender: "bot", text: data.reply };
-      setMessages((prev) => [...prev, botMsg]);
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) {
+          const remainder = decoder.decode();
+          if (remainder) {
+            setMessages((prev) => {
+              const updated = [...prev];
+              const lastIndex = updated.length - 1;
+              if (lastIndex >= 0 && updated[lastIndex].sender === "bot") {
+                updated[lastIndex] = {
+                  ...updated[lastIndex],
+                  text: updated[lastIndex].text + remainder,
+                };
+              } else {
+                updated.push({ sender: "bot", text: remainder });
+              }
+              return updated;
+            });
+          }
+          break;
+        }
+
+        if (!value) {
+          continue;
+        }
+
+        const chunkValue = decoder.decode(value, { stream: true });
+        if (!chunkValue) continue;
+
+        setMessages((prev) => {
+          const updated = [...prev];
+          const lastIndex = updated.length - 1;
+          if (lastIndex >= 0 && updated[lastIndex].sender === "bot") {
+            updated[lastIndex] = {
+              ...updated[lastIndex],
+              text: updated[lastIndex].text + chunkValue,
+            };
+          } else {
+            updated.push({ sender: "bot", text: chunkValue });
+          }
+          return updated;
+        });
+      }
     } catch (err) {
-      setMessages((prev) => [
-        ...prev,
-        { sender: "bot", text: "⚠️ Failed to fetch reply." },
-      ]);
+      console.error("Chat request failed", err);
+      setMessages((prev) => {
+        const updated = [...prev];
+        const lastIndex = updated.length - 1;
+        if (lastIndex >= 0 && updated[lastIndex].sender === "bot") {
+          updated[lastIndex] = {
+            sender: "bot",
+            text: "⚠️ Failed to fetch reply.",
+          };
+          return updated;
+        }
+        return [...updated, { sender: "bot", text: "⚠️ Failed to fetch reply." }];
+      });
     }
   };
 

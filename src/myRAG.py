@@ -194,6 +194,49 @@ class RAG:
             # Return model response
             return response
 
+        def stream_response(self, inputs: dict):
+            """Stream the LLM response while updating memory when complete."""
+            context = inputs.get("context", "")
+            question = inputs.get("question", "")
+            chat_history = self.memory.load_memory_variables({})["chat_history"]
+
+            formatted_prompt = self.chat_template.format_prompt(
+                context=context,
+                chat_history=chat_history,
+                question=question
+            ).to_messages()
+
+            def chunk_to_text(chunk) -> str:
+                if chunk is None:
+                    return ""
+                content = getattr(chunk, "content", "")
+                if isinstance(content, str):
+                    return content
+                if isinstance(content, list):
+                    pieces = []
+                    for part in content:
+                        if isinstance(part, dict):
+                            pieces.append(part.get("text", ""))
+                        else:
+                            pieces.append(getattr(part, "text", str(part)))
+                    return "".join(pieces)
+                return str(content)
+
+            collected_chunks: list[str] = []
+            try:
+                for chunk in self.llm.stream(formatted_prompt):
+                    text = chunk_to_text(chunk)
+                    if text:
+                        collected_chunks.append(text)
+                        yield text
+            finally:
+                full_response = "".join(collected_chunks)
+                if question or full_response:
+                    self.memory.save_context(
+                        {"input": question},
+                        {"output": full_response}
+                    )
+
         @staticmethod
         def get_chat_template():
             from langchain.prompts.chat import (
@@ -234,32 +277,45 @@ Your task:
     #}}
     #{{ Chat function
     def ask(self, query:str, retrival_option:str="localFirst") -> str:
-        if query.strip() == "new":
+        return "".join(self.ask_stream(query, retrival_option=retrival_option))
+
+    def ask_stream(self, query: str, retrival_option: str = "localFirst"):
+        query_stripped = query.strip()
+        if query_stripped == "new":
             self.clear_chat_history()
-            return "OK, let's start a new chat."
-        elif query.strip() == "ping":
+            yield "OK, let's start a new chat."
+            return
+        elif query_stripped == "ping":
             try:
                 _ = self.llm.invoke("ping")  # dummy prompt
-                return "Yes, yes, I'm still alive."
+                yield "Yes, yes, I'm still alive."
             except Exception as e:
-                return f"Ping failed: {e}"
-            
-        retdoc, retdoc_meta = self.custom_retreiver(query, memory=self.chain.memory, retrival_option=retrival_option)
-        result = self.chain.invoke({"question": query, "context": retdoc}).content
-        if retdoc_meta:
-            doc={}
-            for x in retdoc_meta:
-                if not(x['filename'] in doc):
-                    doc[x['filename']]=set()
-                doc[x['filename']].add(x['page'])
+                yield f"Ping failed: {e}"
+            return
 
-            refstr=[]
+        retdoc, retdoc_meta = self.custom_retreiver(query, memory=self.chain.memory, retrival_option=retrival_option)
+
+        def references_text(meta_list):
+            if not meta_list:
+                return ""
+            doc: dict[str, set[str]] = {}
+            for x in meta_list:
+                filename = x['filename']
+                if filename not in doc:
+                    doc[filename] = set()
+                doc[filename].add(x['page'])
+
+            ref_lines = []
             for filename, pageset in doc.items():
-                refstr.append(filename+' (p.'+', '.join(sorted(pageset))+')')
-                
-            result = result + '\n\n_References:_\n' +\
-                "\n".join([f"- _{x}_" for x in refstr])
-        return result
+                ref_lines.append(filename + ' (p.' + ', '.join(sorted(pageset)) + ')')
+            return '\n\n_References:_\n' + "\n".join([f"- _{x}_" for x in ref_lines])
+
+        pending_references = references_text(retdoc_meta)
+        for chunk in self.chain.stream_response({"question": query, "context": retdoc}):
+            yield chunk
+
+        if pending_references:
+            yield pending_references
         
     def chat(self):
         print("Let talk :) (type 'bye' to quit)")

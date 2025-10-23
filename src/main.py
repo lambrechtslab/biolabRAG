@@ -2,6 +2,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from myRAG import RAG
+from fastapi.responses import StreamingResponse
 rag = RAG()
 rag.ready()
 print("RAG is ready.")
@@ -29,12 +30,16 @@ class Message(BaseModel):
 
 @app.post("/chat")
 async def chat(message: Message):
-    # Just echo back for demo
     print(f"Send message: {message.text}")
-    aws = rag.ask(message.text, retrival_option=message.option)
-    print(f"Got answer: {aws}")
-    return {"reply": aws}
-    # return {"reply": f"You said: {message.text}"} #For debug
+
+    def stream_with_logging():
+        collected = []
+        for chunk in rag.ask_stream(message.text, retrival_option=message.option):
+            collected.append(chunk)
+            yield chunk
+        print(f"Got answer: {''.join(collected)}")
+
+    return StreamingResponse(stream_with_logging(), media_type="text/plain")
 
 @app.post("/reset")
 async def reset_dialog():
