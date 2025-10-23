@@ -207,7 +207,7 @@ You are an AI assistant specialized in retrieval-augmented generation (RAG).
 Your task:
 1. Use ONLY the content inside <context> as your factual source. If some information is missing, say so clearly rather than guessing.
 2. Provide detailed, well-reasoned, and structured answers. Prefer depth over brevity — include context, explanations, examples, and relationships between ideas.
-3. Prefer short paragraphs and readable formatting over dense text. Use Markdown formatting for clarity. When listing points, ensure list items and subpoints appear on separate lines.
+3. Prefer short paragraphs and readable formatting over dense text. Use Markdown formatting for clarity.
 """
             system_prompt = SystemMessagePromptTemplate.from_template(system_template)
             human_template = """
@@ -222,12 +222,7 @@ Your task:
 <question>
 {question}
 </question>
-
-<output_format>
-Respond **only** in Markdown format.
-Include headings, bullet points, numbered lists, and bold/italic emphasis when appropriate.
-</output_format>
-                    """
+"""
             human_prompt = HumanMessagePromptTemplate.from_template(human_template)
             return ChatPromptTemplate.from_messages([system_prompt, human_prompt])
     #}}
