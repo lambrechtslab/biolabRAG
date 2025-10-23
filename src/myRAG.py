@@ -41,10 +41,7 @@ def sigmoid(x):
 #}}
 class RAG:
     #{{ init
-    def __init__(self, num_ctx:int=8192, crossencoder_normscore_cutoff:float=0.6, crossencoder_normscore_cutoff_loose:float=0.3):
-        self.num_ctx = num_ctx
-        self.chat_history_num_ctx = round(self.num_ctx / 3)
-        self.doc_num_ctx = round(self.num_ctx / 2)
+    def __init__(self, crossencoder_normscore_cutoff:float=0.6, crossencoder_normscore_cutoff_loose:float=0.3):
         self.crossencoder_normscore_cutoff = crossencoder_normscore_cutoff
         self.crossencoder_normscore_cutoff_loose = crossencoder_normscore_cutoff_loose
         self.chunk_size_by_char = 1500    # ~400 tokens
@@ -54,21 +51,28 @@ class RAG:
         
         # self.llm = ChatOllama(model="llama3.1:70b", base_url="http://localhost:11434")
         # self.embeddings = OllamaEmbeddings(model="mxbai-embed-large", base_url="http://localhost:11435")
-        
-        # self.llm = ChatOllama(model="llama3.1:70b",
-        #                       # num_ctx=131072,        # desired context window
-        #                       num_ctx=self.num_ctx,    # desired context window fastest: 8192; balanced: 16384 / 32768; max: 131072
-        #                       num_keep=256,            # keep system/instructions when sliding
-        #                       temperature=0)
-        self.llm = ChatOllama(model="s10350330/openbiollm-llama3-70b.i1-q4_k_m.gguf",
-                              num_ctx=self.num_ctx,
+        # # Using LLama3.1 70b
+        self.num_ctx = 16384
+        self.llm = ChatOllama(model="llama3.1:70b",
+                              num_ctx=self.num_ctx,    # desired context window fastest: 8192; balanced: 16384 / 32768; max: 131072
                               num_keep=256,            # keep system/instructions when sliding
-                              temperature=0.7,         # Slight creativity for fluent writing
-                              top_p=0.9,               # Diverse but focused sampling
-                              top_k=50,                # Helps content variety
-                              repetition_penalty=1.05, # Avoids loops without truncating
-                              num_predict=1800         # Ensures multi-paragraph output
-                              )
+                              temperature=0)
+
+        # # Using OpenBioLLM
+        # self.num_ctx = 8192
+        # self.llm = ChatOllama(model="s10350330/openbiollm-llama3-70b.i1-q4_k_m.gguf",
+        #                       num_ctx=self.num_ctx,
+        #                       num_keep=256,            # keep system/instructions when sliding
+        #                       temperature=0.7,         # Slight creativity for fluent writing
+        #                       top_p=0.9,               # Diverse but focused sampling
+        #                       top_k=50,                # Helps content variety
+        #                       repetition_penalty=1.05, # Avoids loops without truncating
+        #                       num_predict=1800         # Ensures multi-paragraph output
+        #                       )
+        
+        self.chat_history_num_ctx = round(self.num_ctx / 3)
+        self.doc_num_ctx = round(self.num_ctx / 2)
+        
         self.embeddings = HuggingFaceEmbeddings(
             model_name="intfloat/e5-large-v2",
             model_kwargs={"device": "cpu"},
@@ -87,6 +91,10 @@ class RAG:
         
         threading.Thread(target=self.keep_warm, args=(60,), daemon=True).start() #Keep LLM warm.
         
+    #}}
+    #{{ clear_chat_history
+    def clear_chat_history(self):
+        self.chain.memory.clear()
     #}}
     #{{ Keep LLM warm
     def keep_warm(self, interval: int = 300):
@@ -232,7 +240,7 @@ Include headings, bullet points, numbered lists, and bold/italic emphasis when a
     #{{ Chat function
     def ask(self, query:str, retrival_option:str="localFirst") -> str:
         if query.strip() == "new":
-            self.chain.memory.clear()
+            self.clear_chat_history()
             return "OK, let's start a new chat."
         elif query.strip() == "ping":
             try:

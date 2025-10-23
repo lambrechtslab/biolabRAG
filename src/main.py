@@ -35,3 +35,11 @@ async def chat(message: Message):
     print(f"Got answer: {aws}")
     return {"reply": aws}
     # return {"reply": f"You said: {message.text}"} #For debug
+
+@app.post("/reset")
+async def reset_dialog():
+    """Endpoint to allow the frontend to signal a dialog reset."""
+    print("Reset dialog requested from frontend.")
+    rag.clear_chat_history()
+    # Hook for any backend-side cleanup when conversations reset.
+    return {"status": "reset received"}

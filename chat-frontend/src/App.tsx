@@ -49,6 +49,25 @@ export default function App() {
     }
   };
 
+  const resetChat = async () => {
+    setMessages([]);
+    // setInput("");
+
+    try {
+      const res = await fetch("http://localhost:8000/reset", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+      });
+
+      if (!res.ok) {
+        throw new Error("Failed to notify backend");
+      }
+    } catch (err) {
+      // The UI is already reset even if the backend notification fails.
+      console.error("Unable to notify backend about reset", err);
+    }
+  };
+			      
   return (
     <div className="chat-container">
       <h4>Demo AI RAG system for DILA @Jieyi</h4>
@@ -66,7 +85,6 @@ export default function App() {
         ))}
         <div ref={bottomRef} />
       </div>
-
       {/* Input box */}
       <div className="chat-input">
         <input
@@ -77,38 +95,50 @@ export default function App() {
         />
         <button onClick={sendMessage}>Send</button>
       </div>
-
-      {/* Radio button group */}
-      <div className="radio-group">
-	 Knowledge Source:
-	 <label>
-          <input
-            type="radio"
-            value="localFirst"
-            checked={selectedOption === "localFirst"}
-            onChange={(e) => setSelectedOption(e.target.value)}
-          />
-          Local First
-        </label>
-        <label>
-          <input
-            type="radio"
-            value="localOnly"
-            checked={selectedOption === "localOnly"}
-            onChange={(e) => setSelectedOption(e.target.value)}
-          />
-          Local Only
-        </label>
-        <label>
-          <input
-            type="radio"
-            value="PubMedOnly"
-            checked={selectedOption === "PubMedOnly"}
-            onChange={(e) => setSelectedOption(e.target.value)}
-          />
-          PubMed Only
-        </label>
-      </div>
+      <table width="100%">
+	<td align="left">
+	  <div>
+	    <button className="reset-button" onClick={resetChat}>
+              New Chat
+	    </button>
+	  </div>
+	</td>
+	<td align="right">
+	  {/* Radio button group */}
+	  <div className="radio-group">
+	    <label>
+	      Knowledge Source:
+	    </label>
+	    <label>
+              <input
+		type="radio"
+		value="localFirst"
+		checked={selectedOption === "localFirst"}
+		onChange={(e) => setSelectedOption(e.target.value)}
+              />
+              Local First
+            </label>
+            <label>
+              <input
+		type="radio"
+		value="localOnly"
+		checked={selectedOption === "localOnly"}
+		onChange={(e) => setSelectedOption(e.target.value)}
+              />
+              Local Only
+            </label>
+            <label>
+              <input
+		type="radio"
+		value="PubMedOnly"
+		checked={selectedOption === "PubMedOnly"}
+		onChange={(e) => setSelectedOption(e.target.value)}
+              />
+              PubMed Only
+            </label>
+	  </div>
+	</td>
+      </table>
     </div>
   );
 }
