@@ -1,3 +1,6 @@
+import asyncio
+from typing import List
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -14,6 +17,15 @@ origins = [
     "http://localhost:5173",
 ]
 
+_custom_event_listeners: List[asyncio.Queue[str]] = []
+
+
+def send_custom_event(message: str) -> None:
+    """Send a custom message to any connected frontend listeners."""
+
+    for queue in list(_custom_event_listeners):
+        queue.put_nowait(message)
+
 # Allow frontend to connect
 app.add_middleware(
     CORSMiddleware,
@@ -27,6 +39,30 @@ app.add_middleware(
 class Message(BaseModel):
     text: str
     option: str
+
+
+@app.get("/custom-events")
+async def custom_events_stream():
+    """Stream server-sent events containing custom backend messages."""
+
+    queue: asyncio.Queue[str] = asyncio.Queue()
+    _custom_event_listeners.append(queue)
+
+    async def event_generator():
+        try:
+            while True:
+                message = await queue.get()
+                yield f"data: {message}\n\n"
+        finally:
+            if queue in _custom_event_listeners:
+                _custom_event_listeners.remove(queue)
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
+    )
+
 
 @app.post("/chat")
 async def chat(message: Message):

@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect } from "react";
+import { useState, useRef, useEffect, useCallback } from "react";
 import ReactMarkdown from "react-markdown";   // 👈 import
 import remarkGfm from "remark-gfm";           // optional for tables, checkboxes
 
@@ -15,9 +15,36 @@ export default function App() {
   const [selectedOption, setSelectedOption] = useState("localFirst");
   const bottomRef = useRef<HTMLDivElement>(null);
 
+  const handleBackendEvent = useCallback(
+    (payload: string) => {
+      setMessages((prev) => [
+        ...prev,
+        { sender: "bot", text: `📢 Backend event: ${payload}` },
+      ]);
+    },
+    [setMessages]
+  );
+
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
+
+  useEffect(() => {
+    const eventSource = new EventSource("http://localhost:8000/custom-events");
+
+    eventSource.onmessage = (event) => {
+      handleBackendEvent(event.data);
+    };
+
+    eventSource.onerror = (err) => {
+      console.error("Custom event stream error", err);
+      eventSource.close();
+    };
+
+    return () => {
+      eventSource.close();
+    };
+  }, [handleBackendEvent]);
 
   const sendMessage = async () => {
     if (!input.trim()) return;
