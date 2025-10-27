@@ -12,5 +12,5 @@
 #### Interface
 ![](extdata/chart/example.png)
 
-#### Techniques
+#### Technology
 Framework: LangChain; Frontend: React; Backend: FastAPI; LLM deployer: Ollama; Main LLM: Llama3.1 70B; Embedding model: intfloat/e5-large-v2; cross encoder model: ms-marco-MiniLM-L-6-v2; Vector database: Chroma; PubMed search API: Entrez E-utilities.
