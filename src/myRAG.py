@@ -41,19 +41,19 @@ def sigmoid(x):
 #}}
 class RAG:
     #{{ init
-    def __init__(self, crossencoder_normscore_cutoff:float=0.6, crossencoder_normscore_cutoff_loose:float=0.3):
+    def __init__(self, main_model_name="llama3.1:70b", num_ctx:int=16384, crossencoder_normscore_cutoff:float=0.6, crossencoder_normscore_cutoff_loose:float=0.3, raw_documents_path:str="../raw_documents", vectordb_path:str="../vectordb", minor_models_device:str="cpu"):
         self.crossencoder_normscore_cutoff = crossencoder_normscore_cutoff
         self.crossencoder_normscore_cutoff_loose = crossencoder_normscore_cutoff_loose
         self.chunk_size_by_char = 1500    # ~400 tokens
         self.chunk_overlap_by_char = 300  # ~80 tokens
+        self.raw_documents_path = raw_documents_path
+        self.vectordb_path = vectordb_path
         
         print("RAG init....")
         
-        # self.llm = ChatOllama(model="llama3.1:70b", base_url="http://localhost:11434")
-        # self.embeddings = OllamaEmbeddings(model="mxbai-embed-large", base_url="http://localhost:11435")
         # # Using LLama3.1 70b
-        self.num_ctx = 16384
-        self.llm = ChatOllama(model="llama3.1:70b",
+        self.num_ctx = num_ctx
+        self.llm = ChatOllama(model=main_model_name,
                               num_ctx=self.num_ctx,    # desired context window fastest: 8192; balanced: 16384 / 32768; max: 131072
                               num_keep=256,            # keep system/instructions when sliding
                               temperature=0)
@@ -75,11 +75,11 @@ class RAG:
         
         self.embeddings = HuggingFaceEmbeddings(
             model_name="intfloat/e5-large-v2",
-            model_kwargs={"device": "cpu"},
+            model_kwargs={"device": minor_models_device},
             encode_kwargs={"normalize_embeddings": True}
         )
         self.crossencoder = CrossEncoder(model_name_or_path="cross-encoder/ms-marco-MiniLM-L-6-v2",
-                                      device="cpu")
+                                      device=minor_models_device)
 
         #test
         assert self.llm.invoke("Hello")
@@ -106,36 +106,36 @@ class RAG:
                 print("Keep-warm failed:", e)
             time.sleep(interval)
     #}}
-    #{{ Function for saving data to lib
+    #{{ Loading vector database
     def data_lib_init(self):
-        pdf_folder = "/vsc-hard-mounts/leuven-user/323/vsc32366/projects/LLM/RAG_data"
-        persist_directory = '/vsc-hard-mounts/leuven-user/323/vsc32366/projects/LLM/Chroma_save_big'
-        # documents = []
+        pdf_folder = self.raw_documents_path
+        persist_directory = self.vectordb_path
         if os.path.isdir(persist_directory):
             print("Found RAG library. Loading")
             self.vector_store = Chroma(
                 collection_name="example_collection",
                 embedding_function=self.embeddings,
-                persist_directory=persist_directory,  # Where to save data locally, remove if not necessary
+                persist_directory=persist_directory,
             )
         else:
-            print(f"Prepare RAG library to folder: {persist_directory}")
-            self.vector_store = Chroma(
-                collection_name="example_collection",
-                embedding_function=self.embeddings,
-                persist_directory=persist_directory,  # Where to save data locally, remove if not necessary
-            )
-            text_splitter = RecursiveCharacterTextSplitter(chunk_size=self.chunk_size_by_char, chunk_overlap=self.chunk_overlap_by_char)
-            for filename in os.listdir(pdf_folder):
-                if filename.endswith(".pdf"):
-                    print(f"Loading {filename} ...", end='')
-                    loader = PyPDFLoader(os.path.join(pdf_folder, filename))
-                    docs = loader.load()
-                    print(f"Splitting...", end='')
-                    chunk = text_splitter.split_documents(docs)
-                    print(f"Embedding & saving...", end='')
-                    self.vector_store.add_documents(chunk)
-                    print("Done.")
+            raise Exception(f"Cannot find vector DB in path: {persist_directory}. Use tools/prepare_data.py to create one first.")
+            # print(f"Prepare RAG library to folder: {persist_directory}")
+            # self.vector_store = Chroma(
+            #     collection_name="example_collection",
+            #     embedding_function=self.embeddings,
+            #     persist_directory=persist_directory,
+            # )
+            # text_splitter = RecursiveCharacterTextSplitter(chunk_size=self.chunk_size_by_char, chunk_overlap=self.chunk_overlap_by_char)
+            # for filename in os.listdir(pdf_folder):
+            #     if filename.endswith(".pdf"):
+            #         print(f"Loading {filename} ...", end='')
+            #         loader = PyPDFLoader(os.path.join(pdf_folder, filename))
+            #         docs = loader.load()
+            #         print(f"Splitting...", end='')
+            #         chunk = text_splitter.split_documents(docs)
+            #         print(f"Embedding & saving...", end='')
+            #         self.vector_store.add_documents(chunk)
+            #         print("Done.")
     #}}
     #{{ Create retriver
     def retriver_init(self, k=30):

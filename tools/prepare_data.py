@@ -1,11 +1,19 @@
 import os
+from dotenv import load_dotenv
+from pathlib import Path
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_community.document_loaders import PyPDFLoader
 from langchain_chroma import Chroma
 from langchain_huggingface import HuggingFaceEmbeddings
 
-pdf_folder = "/vsc-hard-mounts/leuven-user/323/vsc32366/projects/LLM/RAG_data"
-persist_directory = '/vsc-hard-mounts/leuven-user/323/vsc32366/projects/LLM/Chroma_save_1'
+env_path = Path(__file__).resolve().parent.parent / '.env' #find absolute path of ../
+load_dotenv(dotenv_path=env_path)
+
+pdf_folder = raw_documents_path
+persist_directory = os.environ["VECTORDB_PATH"]
+minor_models_device = os.environ["MINOR_MODELS_DEVICE"]
+raw_documents_path = os.environ["RAW_DOCUMENTS_PATH"]
+
 chunk_size_by_char = 1500    # ~400 tokens
 chunk_overlap_by_char = 300  # ~80 tokens
         
@@ -30,7 +38,7 @@ else:
     vector_store = Chroma(
         collection_name="example_collection",
         embedding_function=embeddings,
-        persist_directory=persist_directory,  # Where to save data locally, remove if not necessary
+        persist_directory=persist_directory,
     )
     text_splitter = RecursiveCharacterTextSplitter(chunk_size=chunk_size_by_char, chunk_overlap=chunk_overlap_by_char)
     for filename in os.listdir(pdf_folder):

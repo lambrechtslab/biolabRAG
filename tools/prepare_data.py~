@@ -6,10 +6,12 @@ from langchain_huggingface import HuggingFaceEmbeddings
 
 pdf_folder = "/vsc-hard-mounts/leuven-user/323/vsc32366/projects/LLM/RAG_data"
 persist_directory = '/vsc-hard-mounts/leuven-user/323/vsc32366/projects/LLM/Chroma_save_1'
-
+chunk_size_by_char = 1500    # ~400 tokens
+chunk_overlap_by_char = 300  # ~80 tokens
+        
 embeddings = HuggingFaceEmbeddings(
             model_name="intfloat/e5-large-v2",
-            model_kwargs={"device": "cpu"},
+            model_kwargs={"device": "cuda"},
             encode_kwargs={"normalize_embeddings": True}
         )
 assert embeddings.embed_query("Hello")
@@ -30,7 +32,7 @@ else:
         embedding_function=embeddings,
         persist_directory=persist_directory,  # Where to save data locally, remove if not necessary
     )
-    text_splitter = RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=50)
+    text_splitter = RecursiveCharacterTextSplitter(chunk_size=chunk_size_by_char, chunk_overlap=chunk_overlap_by_char)
     for filename in os.listdir(pdf_folder):
         if filename.endswith(".pdf"):
             print(f"Loading {filename}")
