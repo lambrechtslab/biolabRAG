@@ -18,8 +18,6 @@ from langchain_ollama import ChatOllama, OllamaEmbeddings
 from langchain_community.document_loaders import PyPDFLoader
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_core.vectorstores import InMemoryVectorStore
-from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain_core.vectorstores import InMemoryVectorStore
 from langchain_chroma import Chroma
 from langchain_core.runnables import RunnableLambda
 # from langchain.memory import ConversationBufferMemory
@@ -40,8 +38,25 @@ def sigmoid(x):
     return (1/(1 + np.exp(-np.array(x)))).tolist()
 #}}
 class RAG:
+    #{{ private function
+    def _web_requests(self, base_url:str, params:dict)->ET.Element | None:
+        max_retries = 5
+        for attempt in range(1, max_retries + 1):
+            try:
+                response = requests.get(base_url, params=params, timeout=10)
+                response.raise_for_status()  # Raises HTTPError for bad responses (4xx, 5xx)
+                root = ET.fromstring(response.content)
+                return root
+            except (requests.RequestException, ET.ParseError) as e:
+                print(f"PubMed searching: attempt {attempt} failed: {e}")
+                if attempt == max_retries:
+                    print("Max retries reached. Returning empty list.")
+                    return None
+                # Exponential backoff: wait 1, 2, 4, 8, ... seconds
+                time.sleep(2 ** (attempt - 1))
+    #}}
     #{{ init
-    def __init__(self, msgfun, main_model_name:str="llama3.1:70b", fast_model_name:str="llama3.1:8b", num_ctx:int=16384, crossencoder_normscore_cutoff:float=0.6, crossencoder_normscore_cutoff_loose:float=0.3, raw_documents_path:str="../raw_documents", vectordb_path:str="../vectordb", minor_models_device:str="cpu"):
+    def __init__(self, msgfun, main_model_name:str="llama3.1:70b", fast_model_name:str="llama3.1:8b", num_ctx:int=32768, crossencoder_normscore_cutoff:float=0.6, crossencoder_normscore_cutoff_loose:float=0.3, raw_documents_path:str="../raw_documents", vectordb_path:str="../vectordb", minor_models_device:str="cpu"):
         self.crossencoder_normscore_cutoff = crossencoder_normscore_cutoff
         self.crossencoder_normscore_cutoff_loose = crossencoder_normscore_cutoff_loose
         self.chunk_size_by_char = 1500    # ~400 tokens
@@ -82,8 +97,8 @@ class RAG:
         #                       num_predict=1800         # Ensures multi-paragraph output
         #                       )
         
-        self.chat_history_num_ctx = round(self.num_ctx / 3)
-        self.doc_num_ctx = round(self.num_ctx / 2)
+        self.chat_history_num_ctx = round(self.num_ctx / 4)
+        self.doc_num_ctx = round(self.num_ctx*2 / 3)
         
         self.embeddings = HuggingFaceEmbeddings(
             model_name="intfloat/e5-large-v2",
@@ -564,20 +579,27 @@ Or:
             "retmode": "xml",               # Response format
             "sort": "relevance"
         }
-        response = requests.get(base_url, params=params)
-        root = ET.fromstring(response.content)
+        # response = requests.get(base_url, params=params)
+        # root = ET.fromstring(response.content)
+        root = self._web_requests(base_url, params)
+        if not root:
+            return []
+        
         return [id_elem.text for id_elem in root.findall(".//Id")]
 
-    def pubmed_fulltext_fetch_and_chop(self, pmc_id:str)->(list[dict], dict):
+    def pubmed_fulltext_fetch_and_chop(self, pmc_id:str)->tuple[list[dict], dict] | None:
         efetch_url = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi"
         params = {
             "db": "pmc",
             "id": pmc_id,
             "retmode": "xml"
         }
-        response = requests.get(efetch_url, params=params)
-        xml_data = response.content
-        root = ET.fromstring(xml_data)
+        # response = requests.get(efetch_url, params=params)
+        # xml_data = response.content
+        # root = ET.fromstring(xml_data)
+        root = self._web_requests(efetch_url, params)
+        if not root:
+            return None
         # Extract title
         title = root.findtext(".//article-title")
         if not title:
@@ -620,20 +642,27 @@ Or:
             "retmode": "xml",               # Response format
             "sort": "relevance"
         }
-        response = requests.get(base_url, params=params)
-        root = ET.fromstring(response.content)
+        # response = requests.get(base_url, params=params)
+        # root = ET.fromstring(response.content)
+        root = self._web_requests(base_url, params)
+        if not root:
+            return []
         return [id_elem.text for id_elem in root.findall(".//Id")]
 
-    def pubmed_abstract_fetch_and_chop(self, pm_id:str)->(list[dict], dict):
+    def pubmed_abstract_fetch_and_chop(self, pm_id:str)->tuple[list[dict], dict] | None:
         efetch_url = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi"
         params = {
             "db": "pubmed",
             "id": pm_id,
             "retmode": "xml"
         }
-        response = requests.get(efetch_url, params=params)
-        xml_data = response.content
-        root = ET.fromstring(xml_data)
+        # response = requests.get(efetch_url, params=params)
+        # xml_data = response.content
+        # root = ET.fromstring(xml_data)
+        root = self._web_requests(efetch_url, params)
+        if not root:
+            return None
+        
         title = root.findtext(".//ArticleTitle")
         if not title:
             print(xml_data)
@@ -743,7 +772,9 @@ Or:
                 pm_ids = self.pubmed_abstract_search(pquery)
                 pubmed_docs = []
                 for pm_id in pm_ids:
-                    pubmed_docs.extend(self.pubmed_fetch_and_chop(pm_id))
+                    t = self.pubmed_fetch_and_chop(pm_id)
+                    if t:
+                        pubmed_docs.extend(t)
                     
                 self.msg(f"PubMed search finished. Relavance ranking....")
                 #Strategy I: only compare to description
