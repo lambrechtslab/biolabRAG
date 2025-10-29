@@ -12,15 +12,13 @@ interface Message {
 export default function App() {
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
+  const [statusmsg, setStatusmsg] = useState("");
   const [selectedOption, setSelectedOption] = useState("localFirst");
   const bottomRef = useRef<HTMLDivElement>(null);
-
+			      
   const handleBackendEvent = useCallback(
     (payload: string) => {
-      setMessages((prev) => [
-        ...prev,
-        { sender: "bot", text: `📢 Backend event: ${payload}` },
-      ]);
+	setStatusmsg(payload)
     },
     [setMessages]
   );
@@ -168,59 +166,66 @@ export default function App() {
         <div ref={bottomRef} />
       </div>
       {/* Input box */}
-      <div className="chat-input">
-        <input
-          value={input}
-          onChange={(e) => setInput(e.target.value)}
-        onKeyDown={(e) => e.key === "Enter" && sendMessage()}
-        placeholder="Type your message..."
-        />
-        <button onClick={sendMessage}>Send</button>
-      </div>
-      <table width="100%">
-	<td align="left">
-	  <div>
-	    <button className="reset-button" onClick={resetChat}>
-              New Chat
-	    </button>
-	  </div>
-	</td>
-	<td align="right">
-	  {/* Radio button group */}
-	  <div className="radio-group">
-	    <label>
-	      Knowledge Source:
-	    </label>
-	    <label>
-              <input
-		type="radio"
-		value="localFirst"
-		checked={selectedOption === "localFirst"}
-		onChange={(e) => setSelectedOption(e.target.value)}
-              />
-              Local First
-            </label>
-            <label>
-              <input
-		type="radio"
-		value="localOnly"
-		checked={selectedOption === "localOnly"}
-		onChange={(e) => setSelectedOption(e.target.value)}
-              />
-              Local Only
-            </label>
-            <label>
-              <input
-		type="radio"
-		value="PubMedOnly"
-		checked={selectedOption === "PubMedOnly"}
-		onChange={(e) => setSelectedOption(e.target.value)}
-              />
-              PubMed Only
-            </label>
-	  </div>
-	</td>
-      </table>
+	<div className="chat-input">
+            <input
+		value={input}
+		onChange={(e) => setInput(e.target.value)}
+		onKeyDown={(e) => e.key === "Enter" && sendMessage()}
+		placeholder="Type your message..."
+            />
+            <button onClick={sendMessage}>Send</button>
+	</div>
+	<table width="100%">
+	    <tbody>
+		<tr>
+		    <td align="left">
+			<div>
+			    <button className="reset-button" onClick={resetChat}>
+				New Chat
+			    </button>
+			</div>
+		    </td>
+		    <td align="right">
+			{/* Radio button group */}
+			<div className="radio-group">
+			    <label>
+				Knowledge Source:
+			    </label>
+			    <label>
+				<input
+				    type="radio"
+				    value="localFirst"
+				    checked={selectedOption === "localFirst"}
+				    onChange={(e) => setSelectedOption(e.target.value)}
+				/>
+				Local First
+			    </label>
+			    <label>
+				<input
+				    type="radio"
+				    value="localOnly"
+				    checked={selectedOption === "localOnly"}
+				    onChange={(e) => setSelectedOption(e.target.value)}
+				/>
+				Local Only
+			    </label>
+			    <label>
+				<input
+				    type="radio"
+				    value="PubMedOnly"
+				    checked={selectedOption === "PubMedOnly"}
+				    onChange={(e) => setSelectedOption(e.target.value)}
+				/>
+				PubMed Only
+			    </label>
+			</div>
+		    </td>
+		</tr>
+	    </tbody>
+	</table>
+	<div className="message_bar">
+	    {statusmsg}
+	</div>
     </div>
   );
 }

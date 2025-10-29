@@ -41,22 +41,34 @@ def sigmoid(x):
 #}}
 class RAG:
     #{{ init
-    def __init__(self, main_model_name="llama3.1:70b", num_ctx:int=16384, crossencoder_normscore_cutoff:float=0.6, crossencoder_normscore_cutoff_loose:float=0.3, raw_documents_path:str="../raw_documents", vectordb_path:str="../vectordb", minor_models_device:str="cpu"):
+    def __init__(self, msgfun, main_model_name:str="llama3.1:70b", fast_model_name:str="llama3.1:8b", num_ctx:int=16384, crossencoder_normscore_cutoff:float=0.6, crossencoder_normscore_cutoff_loose:float=0.3, raw_documents_path:str="../raw_documents", vectordb_path:str="../vectordb", minor_models_device:str="cpu"):
         self.crossencoder_normscore_cutoff = crossencoder_normscore_cutoff
         self.crossencoder_normscore_cutoff_loose = crossencoder_normscore_cutoff_loose
         self.chunk_size_by_char = 1500    # ~400 tokens
         self.chunk_overlap_by_char = 300  # ~80 tokens
         self.raw_documents_path = raw_documents_path
         self.vectordb_path = vectordb_path
+        self.msg = msgfun
         
-        print("RAG init....")
+        self.msg("RAG init....")
         
         # # Using LLama3.1 70b
         self.num_ctx = num_ctx
-        self.llm = ChatOllama(model=main_model_name,
+        self.mainllm = ChatOllama(model=main_model_name,
                               num_ctx=self.num_ctx,    # desired context window fastest: 8192; balanced: 16384 / 32768; max: 131072
                               num_keep=256,            # keep system/instructions when sliding
-                              temperature=0)
+                              temperature=0.7,         # Slight creativity for fluent writing
+                              top_p=0.9,               # Diverse but focused sampling
+                              top_k=50,                # Helps content variety
+                              repetition_penalty=1.05, # Avoids loops without truncating
+                              num_predict=1800         # Ensures multi-paragraph output
+                              )
+        if main_model_name == fast_model_name:
+            self.fastllm = self.llm
+        else:
+            self.fastllm = ChatOllama(model=fast_model_name,
+                          num_ctx=self.num_ctx,    
+                          num_keep=256)
 
         # # Using OpenBioLLM
         # self.num_ctx = 8192
@@ -82,12 +94,14 @@ class RAG:
                                       device=minor_models_device)
 
         #test
-        assert self.llm.invoke("Hello")
-        print("LLM test OK.")
+        assert self.mainllm.invoke("Hello")
+        self.msg(f"Main LLM ({main_model_name}) test OK.")
+        assert self.fastllm.invoke("Hello")
+        self.msg(f"Minor LLM ({fast_model_name}) test OK.")
         assert self.embeddings.embed_query("Hello")
-        print("Embeddings test OK.")
+        self.msg("Embeddings test OK.")
         assert self.crossencoder.predict([("How many people live in Berlin?", "Berlin had a population of 3,520,031 registered inhabitants in an area of 891.82 square kilometers.")])
-        print("Cross Encoder test OK.")
+        self.msg("Cross Encoder test OK.")
         
         threading.Thread(target=self.keep_warm, args=(60,), daemon=True).start() #Keep LLM warm.
         
@@ -101,9 +115,13 @@ class RAG:
         """Send a ping to Ollama every `interval` seconds."""
         while True:
             try:
-                _ = self.llm.invoke("ping")  # dummy prompt
+                _ = self.mainllm.invoke("ping")  # dummy prompt
             except Exception as e:
-                print("Keep-warm failed:", e)
+                self.msg(f"Keep-warm failed for main model: {e}")
+            try:
+                _ = self.fastllm.invoke("ping")  # dummy prompt
+            except Exception as e:
+                self.msg(f"Keep-warm failed for minor model: {e}")
             time.sleep(interval)
     #}}
     #{{ Loading vector database
@@ -111,7 +129,7 @@ class RAG:
         pdf_folder = self.raw_documents_path
         persist_directory = self.vectordb_path
         if os.path.isdir(persist_directory):
-            print("Found RAG library. Loading")
+            self.msg("Found RAG library. Loading...")
             self.vector_store = Chroma(
                 collection_name="example_collection",
                 embedding_function=self.embeddings,
@@ -244,16 +262,70 @@ class RAG:
                 SystemMessagePromptTemplate,
                 HumanMessagePromptTemplate
             )
-            system_template = """
-You are an AI assistant specialized in retrieval-augmented generation (RAG).
+#             system_template = """
+# You are an AI assistant specialized in retrieval-augmented generation (RAG) for academic research in Cancer Biology.
 
-Your task:
-1. Use ONLY the content inside <context> as your factual source. If some information is missing, say so clearly rather than guessing.
-2. Provide detailed, well-reasoned, and structured answers. Prefer depth over brevity — include context, explanations, examples, and relationships between ideas.
-3. Prefer short paragraphs and readable formatting over dense text. Use Markdown formatting for clarity.
-"""
+# Your task:
+# 1. Use ONLY the content inside <context> as your factual source. If some information is missing, say so clearly rather than guessing.
+# 2. Provide detailed, well-reasoned, and structured answers. Prefer depth over brevity — include context, explanations, examples, and relationships between ideas.
+# 3. Prefer short paragraphs and readable formatting over dense text. Use Markdown formatting for clarity.
+# """
+            system_template = """
+You are an AI assistant specialized in retrieval-augmented generation (RAG) for academic and scientific research, with particular strength in Cancer Biology.
+
+Core principles:
+1. **Grounding**
+   - Use ONLY the information provided inside <context> as your factual basis.  
+   - If something is missing or uncertain, state it clearly rather than speculating.  
+   - Never invent data, references, or conclusions not supported by <context>.
+
+2. **Depth and Explanation**
+   - Write in the style of an expert communicating clearly to another scientist or graduate-level reader.  
+   - Prefer comprehensive, reasoned explanations that connect ideas, highlight mechanisms, and discuss implications.  
+   - When the topic allows, enrich your answer with background knowledge from <context> to give context and rationale.  
+   - Aim for completeness and nuance — not a brief summary.
+
+3. **Adaptability**
+   - Tailor structure and tone to the user’s question.  
+     - For factual or mechanistic questions: use concise sections or bullet points for clarity.  
+     - For conceptual or exploratory questions: use narrative exposition with clear logical flow.  
+     - For comparisons or lists: use tables or enumerated lists *if the context supports them*.  
+
+4. **Clarity and Readability**
+   - Use Markdown formatting: headings (###), bullet points, and short paragraphs.  
+   - Define acronyms and key terms the first time they appear if the definition exists in <context>.  
+   - Avoid dense jargon unless the context or question expects it.
+
+5. **Intellectual Honesty**
+   - Clearly separate what is supported by <context> from what is uncertain or not provided.  
+   - If <context> does not contain the answer, acknowledge this and outline what information would be needed to answer fully.
+
+Tone and style:
+- Professional but approachable — similar to ChatGPT’s elaborative style.  
+- Always prioritize accuracy, reasoning, and readability over brevity.
+            """
             system_prompt = SystemMessagePromptTemplate.from_template(system_template)
+#             human_template = """
+# <context>
+# {context}
+# </context>
+
+# <chat_history>
+# {chat_history}
+# </chat_history>
+
+# <question>
+# {question}
+# </question>
+# """
             human_template = """
+You will receive:
+1. <context> … </context>: This is the only trusted source of factual information.
+2. <chat_history> … </chat_history>: The prior conversation turns.
+3. <question> … </question>: The latest user question.
+
+First, think about how to best answer the question using ONLY the information in <context>. Then, write your final answer following the required Answer Format.
+
 <context>
 {context}
 </context>
@@ -265,7 +337,7 @@ Your task:
 <question>
 {question}
 </question>
-"""
+            """
             human_prompt = HumanMessagePromptTemplate.from_template(human_template)
             return ChatPromptTemplate.from_messages([system_prompt, human_prompt])
     #}}
@@ -273,7 +345,7 @@ Your task:
     def ready(self):
         self.data_lib_init()
         self.retriver_init()
-        self.chain=self.ConversationalRunnable(llm=self.llm)
+        self.chain=self.ConversationalRunnable(llm=self.mainllm)
     #}}
     #{{ Chat function
     def ask(self, query:str, retrival_option:str="localFirst") -> str:
@@ -308,7 +380,7 @@ Your task:
             ref_lines = []
             for filename, pageset in doc.items():
                 ref_lines.append(filename + ' (p.' + ', '.join(sorted(pageset)) + ')')
-            return '\n\n_References:_\n' + "\n".join([f"- _{x}_" for x in ref_lines])
+            return '\n\n_Relevant documents:_\n' + "\n".join([f"- _{x}_" for x in ref_lines])
 
         pending_references = references_text(retdoc_meta)
         for chunk in self.chain.stream_response({"question": query, "context": retdoc}):
@@ -370,7 +442,7 @@ NO RETRIEVAL NEEDED
     """
         human_prompt = HumanMessagePromptTemplate.from_template(human_template)
         chat_history = memory.load_memory_variables({})["chat_history"]
-        out = self.llm.invoke(ChatPromptTemplate.from_messages([system_prompt, human_prompt]).format_prompt(question=quest, chat_history=chat_history).to_messages()).content.strip()
+        out = self.fastllm.invoke(ChatPromptTemplate.from_messages([system_prompt, human_prompt]).format_prompt(question=quest, chat_history=chat_history).to_messages()).content.strip()
         if out == "NO RETRIEVAL NEEDED":
             return None
         else:
@@ -465,7 +537,7 @@ Or:
         chat_history = memory.load_memory_variables({})["chat_history"]
         retrieved_results = "\n".join(x['context'] for x in retrieved_docs)
         prompt = ChatPromptTemplate.from_messages([system_prompt, human_prompt]).format_prompt(question=quest, chat_history=chat_history, retrieved_results=retrieved_results)
-        outstr = self.llm.invoke(prompt).content.strip()
+        outstr = self.fastllm.invoke(prompt).content.strip()
         match = re.search(r'\{.*\}', outstr, re.DOTALL)
         if match:
             out = json.loads(match.group(0))
@@ -611,7 +683,7 @@ Or:
                     doc_score_pool[D['context']]=(D, S)
 
             docs_score_sorted = sorted(list(doc_score_pool.values()), key=lambda x: x[1], reverse=True)
-            print(f"{len(docs_score_sorted)} docs retrievaled.")
+            self.msg(f"Totally {len(docs_score_sorted)} chunks retrievaled.")
 
             if docs_score_sorted[0][1] >= self.crossencoder_normscore_cutoff:
                 cutoff = self.crossencoder_normscore_cutoff
@@ -622,14 +694,14 @@ Or:
             P = 0
             pS = 0.0
             for D, S in docs_score_sorted:
-                tokennum = self.llm.get_num_tokens(D['context'])
+                tokennum = self.fastllm.get_num_tokens(D['context'])
                 if S < cutoff or P + tokennum > self.doc_num_ctx:
                     break
                 out_docs.append(D)
                 P += tokennum
                 pS = S
 
-            print(f"{len(out_docs)} docs included. Lowest cross encoder score: {pS}")
+            self.msg(f"Totally {len(out_docs)} chunks used. Lowest cross encoder score: {pS}")
             return out_docs
         
         # if not(self.QA_need_retrival(query, memory=memory)):
@@ -643,7 +715,7 @@ Or:
             if not squerys:
                 return ("No context needed.", [])
         
-            print("Local retrieval...")
+            self.msg("Need local retrieval...")
             docs = []
             squerys_dup = []
             for squery in squerys:
@@ -655,6 +727,8 @@ Or:
             assert len(docs) == len(squerys_dup)
 
             docs = list(map(self.parse_doc, docs))
+            
+            self.msg(f"Local search finished. Relavance ranking...")
             scores = sigmoid(self.crossencoder.predict([(x, y['content']) for x, y in zip(squerys_dup, docs)]))
             out_docs = fill_docs_to_context(docs, scores)
 
@@ -664,13 +738,14 @@ Or:
             pubmed_query = self.QA_if_need_pubmed_search(query, memory, out_docs)
             if pubmed_query:
                 pquery, description = pubmed_query
-                print(f"PubMed query: {pquery}")
-                print(f"Description: {description}")
+                self.msg(f"PubMed query: {pquery}")
+                # print(f"Description: {description}")
                 pm_ids = self.pubmed_abstract_search(pquery)
                 pubmed_docs = []
                 for pm_id in pm_ids:
                     pubmed_docs.extend(self.pubmed_fetch_and_chop(pm_id))
-
+                    
+                self.msg(f"PubMed search finished. Relavance ranking....")
                 #Strategy I: only compare to description
                 pubmed_scores = sigmoid(self.crossencoder.predict([(description, y['content']) for y in pubmed_docs]))
 
@@ -680,7 +755,7 @@ Or:
                 t = sorted(zip(pubmed_docs, pubmed_scores), key=lambda x: x[1], reverse=True)
                 for (i, (D, S)) in enumerate(t):
                     # I included at least 3 PubMed result in the context.
-                    if i == 0: print(f"Highest PubMed relativity: {t[0][1]}")
+                    if i == 0: self.msg(f"Highest PubMed relativity: {t[0][1]}")
                     if S > self.crossencoder_normscore_cutoff and i <= 3:
                         S += 1.0
                     s_pubmed_docs.append(D)
@@ -898,21 +973,20 @@ Note:
             retrieved_results = "\n".join(retrieved_results)
 
         prompt = ChatPromptTemplate.from_messages([system_prompt, human_prompt]).format_prompt(question=quest, chat_history=chat_history, previous_queries=previous_queries, retrieved_results=retrieved_results)
-        # print(prompt)
-        tokennum = self.llm.get_num_tokens_from_messages(prompt.to_messages())
-        print(f"Token number: {tokennum}")
+        # tokennum = self.llm.get_num_tokens_from_messages(prompt.to_messages())
+        # print(f"Token number: {tokennum}")
         outstr = self.llm.invoke(prompt).content.strip()
         try:
             out = json.loads(outstr)
         except Exception as e:
             warnings.warn(f"Error in parse below JSON:\n{outstr}\nError: {e}")
             return None
-
-        print(out['explanation'])
+        if out['explanation']:
+            self.msg(out['explanation'])
         if out['decision'] == "NO_ADDITIONAL_RETRIEVAL_NEEDED":
             return None
         elif out['decision'] == "RETRIEVAL_HOPELESS":
-            print("Retrival hopeless. Give up.")
+            self.msg("Retrival hopeless. Give up.")
             return None
         else:
             return out['queries']

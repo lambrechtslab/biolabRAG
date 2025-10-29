@@ -2,9 +2,9 @@
 .chat-container {
   display: flex;
   flex-direction: column;
-  gap: 16px;
+  gap: 6px;
   height: 100vh;
-  padding: 24px 32px;
+  padding: 6px 32px;
   box-sizing: border-box;
 
   /* Center the chat on wide screens */
@@ -162,4 +162,11 @@ html, body, #root {
 .reset-button:hover {
   transform: translateY(-1px);
   box-shadow: 0 10px 20px rgba(37, 99, 235, 0.25);
+}
+
+.message_bar {
+  padding-top: 0px;
+  padding-right: 30px;
+  padding-bottom: 0px;
+  padding-left: 30px;
 }

@@ -14,30 +14,40 @@ print("Start backend")
 env_path = Path(__file__).resolve().parent.parent / '.env' #find absolute path of ../
 load_dotenv(dotenv_path=env_path)
 
+origins = [x.strip() for x in os.environ["ALLOW_ORIGINS"].split(",")]
+
+_custom_event_listeners: List[asyncio.Queue[str]] = []
+def send_custom_event(message: str, attach:bool=False, bgprint:bool=True) -> None:
+    """Send a custom message to any connected frontend listeners."""
+    if bgprint:
+        if attach:
+            print(message, end="")
+        else:
+            print(message)
+    last_message = getattr(send_custom_event, "last_message", "")
+    if attach:
+        message = last_message + message
+    send_custom_event.last_message = message
+    for queue in list(_custom_event_listeners):
+        queue.put_nowait(message)
+        
+send_custom_event("Starting RAG...")
 rag = RAG(main_model_name = os.environ["MAIN_MODEL_NAME"],
+          fast_model_name = os.environ["MINOR_MODEL_NAME"],
           num_ctx = int(os.environ["NUM_CTX"]),
           vectordb_path = os.environ["VECTORDB_PATH"],
           minor_models_device = os.environ["MINOR_MODELS_DEVICE"],
-          raw_documents_path = os.environ["RAW_DOCUMENTS_PATH"])
+          raw_documents_path = os.environ["RAW_DOCUMENTS_PATH"],
+          msgfun=send_custom_event)
 rag.ready()
-print("RAG is ready.")
-
+send_custom_event("RAG is ready.")
+        
 app = FastAPI()
 
 # origins = [
 #     "http://127.0.0.1:5173",
 #     "http://localhost:5173",
 # ]
-origins = [x.strip() for x in os.environ["ALLOW_ORIGINS"].split(",")]
-
-_custom_event_listeners: List[asyncio.Queue[str]] = []
-
-
-def send_custom_event(message: str) -> None:
-    """Send a custom message to any connected frontend listeners."""
-
-    for queue in list(_custom_event_listeners):
-        queue.put_nowait(message)
 
 # Allow frontend to connect
 app.add_middleware(
@@ -80,13 +90,19 @@ async def custom_events_stream():
 @app.post("/chat")
 async def chat(message: Message):
     print(f"Send message: {message.text}")
+    if message.text[0]==':':
+        send_custom_event(message.text[1:])
+        return StreamingResponse("", media_type="text/plain")
+    elif message.text[0]=='+':
+        send_custom_event(message.text[1:], attach=True)
+        return StreamingResponse("", media_type="text/plain")
 
     def stream_with_logging():
         collected = []
         for chunk in rag.ask_stream(message.text, retrival_option=message.option):
             collected.append(chunk)
             yield chunk
-        print(f"Got answer: {''.join(collected)}")
+        print(f"Answer finished. Total {len(''.join(collected))} chars.")
 
     return StreamingResponse(stream_with_logging(), media_type="text/plain")
 
